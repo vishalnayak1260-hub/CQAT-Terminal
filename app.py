@@ -62,7 +62,7 @@ if not ticker_market_data.empty:
     fig_price = px.line(ticker_market_data, x='date', y=['close_price', 'sma_50'], 
                         title=f"{selected_ticker} Price Action vs 50-SMA",
                         color_discrete_sequence=['#3b82f6', '#ef4444'])
-    st.plotly_chart(fig_price, use_container_width=True)
+    st.plotly_chart(fig_price, width='stretch')
 
 # ==========================================
 # 5. BIOLOGICAL EDGE & STOCHASTIC ENGINE
@@ -104,7 +104,7 @@ if not ticker_clinical_data.empty:
                                   title="Implied Share Price Distribution (Successful Outcomes Only)",
                                   color_discrete_sequence=['#10b981'])
             fig_mc.update_layout(xaxis_title="Implied Price per Share", yaxis_title="Probability Count")
-            st.plotly_chart(fig_mc, use_container_width=True)
+            st.plotly_chart(fig_mc, width='stretch')
             
             # Statistical Output
             col_mc1, col_mc2, col_mc3 = st.columns(3)
