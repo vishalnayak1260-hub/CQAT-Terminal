@@ -169,17 +169,15 @@ if search_button or raw_input:
                 f_col4.metric("Price-to-Book (P/B)", f"{info.get('priceToBook', 0):.2f}x" if info.get('priceToBook') else "N/A")
 
         # ----------------------------------------------------
-        # TAB 2: COMPARABLE COMPANY ANALYSIS (UPGRADED NLP BATCH)
+        # TAB 2: COMPARABLE COMPANY ANALYSIS (NLP BATCH)
         # ----------------------------------------------------
         with tab_comps:
             st.subheader("Relative Valuation Matrix (Peer Comps)")
             st.markdown("Compares corporate multiples to identify relative market premiums or discount entry points.")
             
-            # Extract raw inputs split by comma
             raw_peer_strings = [p.strip() for p in peer_input.split(",") if p.strip()]
-            
-            # Batch translate every peer name to its official ticker
             resolved_peers = []
+            
             with st.spinner("Resolving peer identities..."):
                 for raw_p in raw_peer_strings:
                     ticker_resolved = resolve_company_name(raw_p)
@@ -187,8 +185,6 @@ if search_button or raw_input:
                         resolved_peers.append(ticker_resolved)
             
             all_tickers_to_compare = [selected_ticker] + resolved_peers
-            
-            # Show the mapping summary inside the tab for transparency
             st.caption(f"Active Peer Tracking Array: {', '.join(all_tickers_to_compare)}")
             
             comps_data = []
@@ -217,7 +213,6 @@ if search_button or raw_input:
                 try:
                     avg_pe = df_comps["P/E Ratio"].mean()
                     target_pe = df_comps[df_comps["Ticker"] == selected_ticker]["P/E Ratio"].values[0]
-                    
                     if target_pe and avg_pe:
                         variance = ((target_pe - avg_pe) / avg_pe) * 100
                         status_label = "Premium" if variance > 0 else "Discount"
@@ -252,12 +247,10 @@ if search_button or raw_input:
             }
             
             dcf_results = {}
-            
             for name, config in scenarios.items():
                 g = config["growth"]
                 projected_cfs = [fcf_base_millions * ((1 + g) ** year) for year in range(1, 6)]
                 pv_cfs = [projected_cfs[t] / ((1 + wacc_input) ** (t + 1)) for t in range(5)]
-                
                 terminal_value = (projected_cfs[-1] * (1 + terminal_growth)) / (wacc_input - terminal_growth)
                 pv_terminal_value = terminal_value / ((1 + wacc_input) ** 5)
                 
