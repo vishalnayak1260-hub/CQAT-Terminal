@@ -5,101 +5,118 @@ import plotly.express as px
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import yfinance as yf
-from database_core import Company, MarketData
+import requests
+from database_core import Base, Company, MarketData
 
 # ==========================================
-# 1. PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION & STYLING
 # ==========================================
-st.set_page_config(page_title="CQAT Terminal", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Junior Analyst Terminal", page_icon="💼", layout="wide")
 
 st.markdown("""
     <style>
     .main {background-color: #0e1117;}
     h1, h2, h3 {color: #e2e8f0;}
     .stMetric {background-color: #1e293b; padding: 15px; border-radius: 10px; border: 1px solid #334155;}
-    .reportview-container .main .block-container {padding-top: 2rem;}
+    .stTabs [data-baseweb="tab"] {font-size: 16px; font-weight: 600; color: #94a3b8;}
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {color: #3b82f6; border-bottom-color: #3b82f6;}
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🧬 Clinical-Quant Arbitrage Terminal (CQAT)")
-st.markdown("Enterprise In-Silico Valuation & Dynamic Query Engine")
+st.title("💼 Institutional Equity Research Terminal")
+st.markdown("Enterprise Multi-Strategy Valuation & Financial Intelligence Workspace")
 st.markdown("---")
 
 # ==========================================
-# 2. DATABASE CONNECTION & INGESTION
+# 2. DATA PROCESSING & INGESTION ENGINE
 # ==========================================
 engine = create_engine('sqlite:///cqat_vault.db')
+Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
+def resolve_company_name(query):
+    """Converts natural language queries into clean market ticker symbols."""
+    clean_query = query.strip()
+    if not clean_query:
+        return ""
+    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_query}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        data = response.json()
+        if 'quotes' in data and len(data['quotes']) > 0:
+            for quote in data['quotes']:
+                if quote.get('quoteType') == 'EQUITY':
+                    return quote.get('symbol')
+            return data['quotes'][0].get('symbol')
+    except Exception:
+        pass
+    return clean_query.upper()
+
 def fetch_and_store_financials(ticker_symbol):
-    """Hits the API, calculates math, and permanently stores new tickers."""
+    """Downloads historical data and initializes record structures in the local SQLite vault."""
     session = Session()
     exists = session.query(Company).filter_by(ticker=ticker_symbol).first()
     if exists:
         session.close()
         return True
         
-    with st.spinner(f"Intercepting live market data for {ticker_symbol}..."):
-        try:
-            stock_info = yf.Ticker(ticker_symbol)
-            company_name = stock_info.info.get('shortName', ticker_symbol)
-            
-            new_company = Company(ticker=ticker_symbol, company_name=company_name, sector='Healthcare')
-            session.add(new_company)
-            
-            df = yf.download(ticker_symbol, period="1y", progress=False)
-            if df.empty:
-                st.error("Invalid Ticker or No Data Found.")
-                session.close()
-                return False
-                
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-                
-            df['SMA_50'] = df['Close'].rolling(window=50).mean()
-            df = df.dropna()
-            
-            records = [
-                MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), 
-                           volume=int(row['Volume']), sma_50=float(row['SMA_50']))
-                for index, row in df.iterrows()
-            ]
-            session.bulk_save_objects(records)
-            session.commit()
-            session.close()
-            st.success(f"Successfully added {ticker_symbol} to the permanent vault.")
-            return True
-            
-        except Exception as e:
-            st.error(f"API Error: {e}")
-            session.rollback()
+    try:
+        stock_info = yf.Ticker(ticker_symbol)
+        company_name = stock_info.info.get('shortName', ticker_symbol)
+        sector = stock_info.info.get('sector', 'General')
+        industry = stock_info.info.get('industry', 'General')
+        
+        new_company = Company(ticker=ticker_symbol, company_name=company_name, sector=sector, industry=industry)
+        session.add(new_company)
+        
+        df = yf.download(ticker_symbol, period="1y", progress=False)
+        if df.empty:
             session.close()
             return False
-
-def load_vault_data(ticker_symbol):
-    df_market = pd.read_sql(f"SELECT * FROM fact_market WHERE ticker = '{ticker_symbol}'", engine)
-    df_clinical = pd.read_sql(f"SELECT * FROM fact_clinical WHERE ticker = '{ticker_symbol}'", engine)
-    return df_market, df_clinical
+            
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df['SMA_50'] = df['Close'].rolling(window=50).mean()
+        df['SMA_200'] = df['Close'].rolling(window=200).mean()
+        df = df.dropna()
+        
+        records = [
+            MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), 
+                       volume=int(row['Volume']), sma_50=float(row['SMA_50']), sma_200=float(row['SMA_200']))
+            for index, row in df.iterrows()
+        ]
+        session.bulk_save_objects(records)
+        session.commit()
+        session.close()
+        return True
+    except Exception:
+        session.rollback()
+        session.close()
+        return False
 
 # ==========================================
-# 3. SIDEBAR NAVIGATION
+# 3. INTERFACE COMMAND SIDEBAR
 # ==========================================
 st.sidebar.header("Command Center")
-raw_input = st.sidebar.text_input("Query Global Equity Ticker (e.g., PFE, NVO, SYNGENE.NS):", "SYNGENE.NS")
-search_button = st.sidebar.button("Execute Search")
+raw_input = st.sidebar.text_input("Target Asset Name / Ticker:", "Biocon")
+search_button = st.sidebar.button("Run Financial Intelligence Suite")
 
-selected_ticker = raw_input.strip().upper()
+st.sidebar.markdown("---")
+st.sidebar.subheader("📐 Custom Peer Comps")
+st.sidebar.markdown("Enter plain company names or raw codes separated by commas:")
+peer_input = st.sidebar.text_input("Peer Tickers / Names:", "Syngene, Dr Reddy, Cipla")
 
 # ==========================================
-# 4. MAIN DASHBOARD EXECUTION
+# 4. EXECUTION MATRIX
 # ==========================================
-if search_button or selected_ticker:
-    is_valid = fetch_and_store_financials(selected_ticker)
+if search_button or raw_input:
+    selected_ticker = resolve_company_name(raw_input)
     
-    if is_valid:
-        ticker_market_data, ticker_clinical_data = load_vault_data(selected_ticker)
+    if fetch_and_store_financials(selected_ticker):
+        df_market = pd.read_sql(f"SELECT * FROM fact_market WHERE ticker = '{selected_ticker}'", engine)
         
-        # Fetch fundamental parameters dynamically for display
         try:
             raw_ticker = yf.Ticker(selected_ticker)
             info = raw_ticker.info
@@ -112,112 +129,186 @@ if search_button or selected_ticker:
             curr_sym = "$"
 
         st.header(f"{full_name} ({selected_ticker})")
-        st.markdown(f"**Sector:** {info.get('sector', 'Healthcare/Biotech')} | **Industry:** {info.get('industry', 'N/A')} | **Exchange:** {info.get('exchange', 'N/A')}")
+        st.markdown(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')} | **Exchange:** {info.get('exchange', 'N/A')}")
         
-        if not ticker_market_data.empty:
-            current_price = ticker_market_data['close_price'].iloc[-1]
-            volume = ticker_market_data['volume'].iloc[-1]
-            
-            # Row 1: High Level Live Market Indicators
-            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-            m_col1.metric("Current Market Price", f"{curr_sym}{current_price:.2f}")
-            m_col2.metric("Latest Volume", f"{volume:,}")
-            
-            # Format large numbers like Market Cap cleanly
-            raw_cap = info.get('marketCap', 0)
-            market_cap_formatted = f"{curr_sym}{raw_cap / 1_000_000_000:.2f} B" if raw_cap else "N/A"
-            m_col3.metric("Market Capitalization", market_cap_formatted)
-            
-            # 52 Week High / Low references
-            low_52 = info.get('fiftyTwoWeekLow', 0)
-            high_52 = info.get('fiftyTwoWeekHigh', 0)
-            m_col4.metric("52-Week Range", f"{curr_sym}{low_52:.1f} - {curr_sym}{high_52:.1f}" if low_52 else "N/A")
-            
-            # Financial Charting Split
-            fig_price = px.line(ticker_market_data, x='date', y=['close_price', 'sma_50'], 
-                                title="Historical Price Action vs 50-SMA",
-                                color_discrete_sequence=['#3b82f6', '#ef4444'])
-            fig_price.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', 
-                                    xaxis_title="Timeline", yaxis_title=f"Price ({currency})")
-            st.plotly_chart(fig_price, width='stretch')
-            
-            # Row 2: Comprehensive Corporate Fundamentals & Ratios
-            st.subheader("📊 Fundamental Valuation Metrics & Risk Ratios")
-            
-            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
-            
-            # Valuation Multiples
-            pe_trailing = info.get('trailingPE')
-            f_col1.metric("Trailing P/E Multiple", f"{pe_trailing:.2f}x" if pe_trailing else "N/A", help="Price to Earnings Ratio")
-            
-            ev_ebitda = info.get('enterpriseToEbitda')
-            f_col2.metric("EV / EBITDA Multiple", f"{ev_ebitda:.2f}x" if ev_ebitda else "N/A", help="Enterprise Value to EBITDA Ratio")
-            
-            # Profitability & Share Metrics
-            eps_trailing = info.get('trailingEps')
-            f_col3.metric("Earnings Per Share (EPS)", f"{curr_sym}{eps_trailing:.2f}" if eps_trailing else "N/A")
-            
-            pb_ratio = info.get('priceToBook')
-            f_col4.metric("Price to Book (P/B) Ratio", f"{pb_ratio:.2f}x" if pb_ratio else "N/A")
-            
-            # Balance Sheet & Capital Structure Risk
-            st.markdown(" ")
-            r_col1, r_col2, r_col3, r_col4 = st.columns(4)
-            
-            debt_to_equity = info.get('debtToEquity')
-            r_col1.metric("Debt-to-Equity Ratio", f"{debt_to_equity:.2f}%" if debt_to_equity else "N/A", help="Total Debt over Total Equity")
-            
-            profit_margin = info.get('profitMargins')
-            r_col2.metric("Net Profit Margin", f"{profit_margin * 100:.2f}%" if profit_margin else "N/A")
-            
-            beta_val = info.get('beta')
-            r_col3.metric("Systematic Risk (Beta)", f"{beta_val:.2f}" if beta_val else "N/A", help="Volatility relative to the broader market")
-            
-            fcf_val = info.get('freeCashflow', 0)
-            fcf_formatted = f"{curr_sym}{fcf_val / 1_000_000:.2f} M" if fcf_val else "N/A"
-            r_col4.metric("Free Cash Flow (TTM)", fcf_formatted, help="Trailing twelve months free cash flow generation")
+        tab_market, tab_comps, tab_dcf, tab_dupont = st.tabs([
+            "📈 Market Performance & Multiples", 
+            "📊 Comparable Peer Benchmarking", 
+            "🔮 Intrinsic 3-Scenario DCF Model",
+            "🔍 DuPont Profitability Analysis"
+        ])
+        
+        # ----------------------------------------------------
+        # TAB 1: MARKET PERFORMANCE & MULTIPLES
+        # ----------------------------------------------------
+        with tab_market:
+            if not df_market.empty:
+                current_price = df_market['close_price'].iloc[-1]
+                volume = df_market['volume'].iloc[-1]
+                raw_cap = info.get('marketCap', 0)
+                market_cap_formatted = f"{curr_sym}{raw_cap / 1000000000:.2f} B" if raw_cap else "N/A"
+                beta_val = info.get('beta', 1.0)
+                
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                m_col1.metric("Latest Close Price", f"{curr_sym}{current_price:.2f}")
+                m_col2.metric("Trading Volume", f"{volume:,}")
+                m_col3.metric("Total Market Cap", market_cap_formatted)
+                m_col4.metric("Systematic Risk (Beta)", f"{beta_val:.2f}")
+                
+                fig_price = px.line(df_market, x='date', y=['close_price', 'sma_50', 'sma_200'], 
+                                    title="Price Action Vector vs Moving Average Support Levels",
+                                    color_discrete_sequence=['#3b82f6', '#ef4444', '#10b981'])
+                fig_price.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', xaxis_title="Date", yaxis_title=f"Price ({currency})")
+                st.plotly_chart(fig_price, width='stretch')
+                
+                st.subheader("Valuation Summary Multiples")
+                f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+                f_col1.metric("Trailing P/E Ratio", f"{info.get('trailingPE', 0):.2f}x" if info.get('trailingPE') else "N/A")
+                f_col2.metric("EV / EBITDA", f"{info.get('enterpriseToEbitda', 0):.2f}x" if info.get('enterpriseToEbitda') else "N/A")
+                f_col3.metric("Earnings Per Share (EPS)", f"{curr_sym}{info.get('trailingEps', 0):.2f}" if info.get('trailingEps') else "N/A")
+                f_col4.metric("Price-to-Book (P/B)", f"{info.get('priceToBook', 0):.2f}x" if info.get('priceToBook') else "N/A")
 
-        # ==========================================
-        # 5. BIOLOGICAL EDGE & STOCHASTIC ENGINE
- * # ==========================================
-        st.markdown("---")
-        st.header("🧬 In-Silico Clinical Evaluation Matrix")
-        
-        if not ticker_clinical_data.empty:
-            target_protein = ticker_clinical_data['target_protein'].iloc[0]
-            phase = ticker_clinical_data['phase'].iloc[0]
+        # ----------------------------------------------------
+        # TAB 2: COMPARABLE COMPANY ANALYSIS (UPGRADED NLP BATCH)
+        # ----------------------------------------------------
+        with tab_comps:
+            st.subheader("Relative Valuation Matrix (Peer Comps)")
+            st.markdown("Compares corporate multiples to identify relative market premiums or discount entry points.")
             
-            st.info(f"**Lead Pipeline Asset Associated with Vault Directory:** Targeting {target_protein} ({phase})")
+            # Extract raw inputs split by comma
+            raw_peer_strings = [p.strip() for p in peer_input.split(",") if p.strip()]
             
-            poa_score = 0.73 if selected_ticker == 'SYNGENE.NS' else 0.85
-            st.metric("Derived Probability of Approval (PoA)", f"{poa_score * 100}%", "Calculated via local structural matrix parameters")
+            # Batch translate every peer name to its official ticker
+            resolved_peers = []
+            with st.spinner("Resolving peer identities..."):
+                for raw_p in raw_peer_strings:
+                    ticker_resolved = resolve_company_name(raw_p)
+                    if ticker_resolved and ticker_resolved not in resolved_peers:
+                        resolved_peers.append(ticker_resolved)
             
-            if st.button("Execute Live Stochastic DCF Simulation (10,000 Iterations)"):
-                with st.spinner("Simulating clinical realities..."):
-                    iterations = 10000
-                    clinical_outcomes = np.random.binomial(1, poa_score, iterations)
-                    simulated_revenues = np.random.normal(loc=5000, scale=800, size=(iterations, 5))
-                    fcf_matrix = simulated_revenues * 0.20
+            all_tickers_to_compare = [selected_ticker] + resolved_peers
+            
+            # Show the mapping summary inside the tab for transparency
+            st.caption(f"Active Peer Tracking Array: {', '.join(all_tickers_to_compare)}")
+            
+            comps_data = []
+            with st.spinner("Extracting operational metrics across peer group..."):
+                for t in all_tickers_to_compare:
+                    try:
+                        p_ticker = yf.Ticker(t)
+                        p_info = p_ticker.info
+                        comps_data.append({
+                            "Ticker": t,
+                            "Company Name": p_info.get('shortName', t),
+                            "P/E Ratio": p_info.get('trailingPE', None),
+                            "EV/EBITDA": p_info.get('enterpriseToEbitda', None),
+                            "P/B Ratio": p_info.get('priceToBook', None),
+                            "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None
+                        })
+                    except:
+                        pass
+            
+            if comps_data:
+                df_comps = pd.DataFrame(comps_data)
+                st.dataframe(df_comps.style.highlight_max(axis=0, subset=['Net Margin (%)']).format({
+                    "P/E Ratio": "{:.2f}x", "EV/EBITDA": "{:.2f}x", "P/B Ratio": "{:.2f}x", "Net Margin (%)": "{:.2f}%"
+                }), use_container_width=True)
+                
+                try:
+                    avg_pe = df_comps["P/E Ratio"].mean()
+                    target_pe = df_comps[df_comps["Ticker"] == selected_ticker]["P/E Ratio"].values[0]
                     
-                    present_value_array = np.zeros(iterations)
-                    for i in range(iterations):
-                        if clinical_outcomes[i] > 0:
-                            npv = sum([fcf_matrix[i, t] / ((1 + 0.10) ** (t + 1)) for t in range(5)])
-                            present_value_array[i] = npv / 400
-                    
-                    successful_paths = present_value_array[present_value_array > 0]
-                    
-                    st.success("Stochastic Modeling Engine Execution Complete.")
-                    fig_mc = px.histogram(successful_paths, nbins=50, 
-                                          title="Implied Pipeline Per-Share Value Distribution (Successful Outcomes Only)",
-                                          color_discrete_sequence=['#10b981'])
-                    fig_mc.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                                         xaxis_title="Implied Pipeline Asset Value per Share", yaxis_title="Probability Density")
-                    st.plotly_chart(fig_mc, width='stretch')
-                    
-                    col_mc1, col_mc2, col_mc3 = st.columns(3)
-                    col_mc1.metric("Asset Worst Case (5%)", f"{curr_sym}{np.percentile(successful_paths, 5):.2f}")
-                    col_mc2.metric("Asset Base Case (50%)", f"{curr_sym}{np.median(successful_paths):.2f}")
-                    col_mc3.metric("Asset Best Case (95%)", f"{curr_sym}{np.percentile(successful_paths, 95):.2f}")
-        else:
-            st.warning("No clinical trial data currently registered in local vault schema for this entity.")
+                    if target_pe and avg_pe:
+                        variance = ((target_pe - avg_pe) / avg_pe) * 100
+                        status_label = "Premium" if variance > 0 else "Discount"
+                        st.info(f"💡 Analytics Insight: **{selected_ticker}** trades at a **{abs(variance):.1f}% {status_label}** relative to the specified peer group average P/E of **{avg_pe:.2f}x**.")
+                except:
+                    pass
+
+        # ----------------------------------------------------
+        # TAB 3: INTRINSIC 3-SCENARIO DCF MODEL
+        # ----------------------------------------------------
+        with tab_dcf:
+            st.subheader("Structured 3-Scenario Free Cash Flow Engine")
+            st.markdown("Calculates intrinsic asset value by applying user-defined growth pathways to trailing operational cash flows.")
+            
+            raw_rev = info.get('totalRevenue', 1000000000)
+            raw_fcf = info.get('freeCashflow', raw_rev * 0.10)
+            fcf_base_millions = float(raw_fcf / 1000000) if raw_fcf else (raw_rev * 0.12) / 1000000
+            
+            st.markdown(f"**Baseline Parameter:** TTM Free Cash Flow captured at **{curr_sym}{fcf_base_millions:.2f} Million**.")
+            
+            dcf_col1, dcf_col2, dcf_col3 = st.columns(3)
+            wacc_input = dcf_col1.slider("Discount Rate (WACC %)", 6.0, 16.0, 10.0, step=0.5) / 100
+            terminal_growth = dcf_col2.slider("Terminal Perpetuity Growth (% Growth)", 1.0, 6.0, 4.0, step=0.2) / 100
+            
+            shares_raw = info.get('sharesOutstanding', 50000000)
+            shares_outstanding = dcf_col3.number_input("Shares Outstanding (Millions)", value=float(shares_raw / 1000000) if shares_raw else 100.0, min_value=1.0)
+            
+            scenarios = {
+                "Bear Case (Conservative)": {"growth": 0.04, "color": "#ef4444"},
+                "Base Case (Market Consensus)": {"growth": 0.08, "color": "#3b82f6"},
+                "Bull Case (Aggressive Expansion)": {"growth": 0.14, "color": "#10b981"}
+            }
+            
+            dcf_results = {}
+            
+            for name, config in scenarios.items():
+                g = config["growth"]
+                projected_cfs = [fcf_base_millions * ((1 + g) ** year) for year in range(1, 6)]
+                pv_cfs = [projected_cfs[t] / ((1 + wacc_input) ** (t + 1)) for t in range(5)]
+                
+                terminal_value = (projected_cfs[-1] * (1 + terminal_growth)) / (wacc_input - terminal_growth)
+                pv_terminal_value = terminal_value / ((1 + wacc_input) ** 5)
+                
+                total_intrinsic_value = sum(pv_cfs) + pv_terminal_value
+                per_share_target = total_intrinsic_value / shares_outstanding
+                dcf_results[name] = per_share_target
+            
+            df_dcf_plot = pd.DataFrame(list(dcf_results.items()), columns=["Scenario", "Target Price Per Share"])
+            fig_dcf = px.bar(df_dcf_plot, x="Scenario", y="Target Price Per Share", text_auto=".2f",
+                             title="Calculated Intrinsic Target Values Across Strategic Corporate Scenarios",
+                             color="Scenario", color_discrete_map={k: v["color"] for k, v in scenarios.items()})
+            st.plotly_chart(fig_dcf, width='stretch')
+            
+            c_price = df_market['close_price'].iloc[-1]
+            st.markdown(f"**Current Market Trading Price:** {curr_sym}{c_price:.2f}")
+            
+            dcf_metrics_cols = st.columns(3)
+            idx = 0
+            for name, val in dcf_results.items():
+                upside = ((val - c_price) / c_price) * 100
+                dcf_metrics_cols[idx].metric(name, f"{curr_sym}{val:.2f}", f"{upside:+.1f}% Implied Edge")
+                idx += 1
+
+        # ----------------------------------------------------
+        # TAB 4: DUPONT PROFITABILITY ANALYSIS
+        # ----------------------------------------------------
+        with tab_dupont:
+            st.subheader("3-Stage DuPont Accounting Deconstruction")
+            st.markdown("Deconstructs corporate Return on Equity (ROE) to evaluate if returns are driven by profitability, operational velocity, or financial leverage.")
+            
+            net_income = info.get('netIncomeToCommon', None)
+            total_assets = info.get('totalAssets', None)
+            total_equity = info.get('totalStockholderEquity', None)
+            revenue = info.get('totalRevenue', None)
+            
+            if net_income and total_assets and total_equity and revenue:
+                net_profit_margin = net_income / revenue
+                asset_turnover = revenue / total_assets
+                equity_multiplier = total_assets / total_equity
+                calculated_roe = net_profit_margin * asset_turnover * equity_multiplier
+                
+                dp_col1, dp_col2, dp_col3, dp_col4 = st.columns(4)
+                dp_col1.metric("Net Profit Margin (Efficiency)", f"{net_profit_margin * 100:.2f}%")
+                dp_col2.metric("Asset Turnover (Operational Speed)", f"{asset_turnover:.2f}x")
+                dp_col3.metric("Equity Multiplier (Financial Leverage)", f"{equity_multiplier:.2f}x")
+                dp_col4.metric("Deconstructed Return on Equity", f"{calculated_roe * 100:.2f}%")
+                
+                st.markdown(" ")
+                if equity_multiplier > 2.5:
+                    st.warning("⚠️ Risk Warning: This business demonstrates a high Equity Multiplier. A significant portion of its structural return vector is driven by capital structure debt leverage rather than pure manufacturing or commercial pricing power margins.")
+                else:
+                    st.success("✅ Operational Health: The corporate leverage profile is balanced, showing that returns are backed by functional operational assets rather than aggressive financial engineering.")
+            else:
+                st.warning("Complete financial statements are missing for this specific ticker code profile to calculate a full 3-Stage DuPont deconstruction.")
