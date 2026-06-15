@@ -171,6 +171,7 @@ if search_button or raw_input:
         except:
             info = {}
             full_name = selected_ticker
+            currency = "USD"
             curr_sym = "$"
             deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None}
 
