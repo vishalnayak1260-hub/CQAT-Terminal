@@ -35,7 +35,6 @@ Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
 def resolve_company_name(query):
-    """Converts natural language queries into clean market ticker symbols."""
     clean_query = query.strip()
     if not clean_query:
         return ""
@@ -53,8 +52,51 @@ def resolve_company_name(query):
         pass
     return clean_query.upper()
 
+def extract_financial_statements(raw_ticker, info):
+    """Deep scraping engine to bypass stripped API dictionaries and pull raw accounting data."""
+    metrics = {
+        'revenue': info.get('totalRevenue'),
+        'net_income': info.get('netIncomeToCommon'),
+        'total_assets': info.get('totalAssets'),
+        'total_equity': info.get('totalStockholderEquity'),
+        'fcf': info.get('freeCashflow')
+    }
+    
+    try:
+        # Pull raw statement dataframes
+        inc = raw_ticker.financials
+        bs = raw_ticker.balance_sheet
+        cf = raw_ticker.cashflow
+        
+        # Scrape Revenue
+        if not inc.empty and metrics['revenue'] is None:
+            for key in ['Total Revenue', 'Operating Revenue', 'Revenue']:
+                if key in inc.index: metrics['revenue'] = inc.loc[key].iloc[0]; break
+                    
+        # Scrape Net Income
+        if not inc.empty and metrics['net_income'] is None:
+            for key in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing And Discontinued Operation']:
+                if key in inc.index: metrics['net_income'] = inc.loc[key].iloc[0]; break
+                    
+        # Scrape Assets
+        if not bs.empty and metrics['total_assets'] is None:
+            if 'Total Assets' in bs.index: metrics['total_assets'] = bs.loc['Total Assets'].iloc[0]
+                
+        # Scrape Equity
+        if not bs.empty and metrics['total_equity'] is None:
+            for key in ['Stockholders Equity', 'Common Stock Equity', 'Total Equity Gross Minority Interest']:
+                if key in bs.index: metrics['total_equity'] = bs.loc[key].iloc[0]; break
+                    
+        # Scrape FCF
+        if not cf.empty and metrics['fcf'] is None:
+            if 'Free Cash Flow' in cf.index: metrics['fcf'] = cf.loc['Free Cash Flow'].iloc[0]
+                
+    except Exception:
+        pass
+        
+    return metrics
+
 def fetch_and_store_financials(ticker_symbol):
-    """Downloads historical data and initializes record structures in the local SQLite vault."""
     session = Session()
     exists = session.query(Company).filter_by(ticker=ticker_symbol).first()
     if exists:
@@ -100,13 +142,13 @@ def fetch_and_store_financials(ticker_symbol):
 # 3. INTERFACE COMMAND SIDEBAR
 # ==========================================
 st.sidebar.header("Command Center")
-raw_input = st.sidebar.text_input("Target Asset Name / Ticker:", "Biocon")
+raw_input = st.sidebar.text_input("Target Asset Name / Ticker:", "Microsoft")
 search_button = st.sidebar.button("Run Financial Intelligence Suite")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📐 Custom Peer Comps")
 st.sidebar.markdown("Enter plain company names or raw codes separated by commas:")
-peer_input = st.sidebar.text_input("Peer Tickers / Names:", "Syngene, Dr Reddy, Cipla")
+peer_input = st.sidebar.text_input("Peer Tickers / Names:", "Apple, Google, Amazon")
 
 # ==========================================
 # 4. EXECUTION MATRIX
@@ -123,10 +165,14 @@ if search_button or raw_input:
             full_name = info.get('longName', info.get('shortName', selected_ticker))
             currency = info.get('currency', 'USD')
             curr_sym = "₹" if currency == "INR" else "$"
+            
+            # Execute the deep extraction engine
+            deep_metrics = extract_financial_statements(raw_ticker, info)
         except:
             info = {}
             full_name = selected_ticker
             curr_sym = "$"
+            deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None}
 
         st.header(f"{full_name} ({selected_ticker})")
         st.markdown(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')} | **Exchange:** {info.get('exchange', 'N/A')}")
@@ -169,7 +215,7 @@ if search_button or raw_input:
                 f_col4.metric("Price-to-Book (P/B)", f"{info.get('priceToBook', 0):.2f}x" if info.get('priceToBook') else "N/A")
 
         # ----------------------------------------------------
-        # TAB 2: COMPARABLE COMPANY ANALYSIS (NLP BATCH)
+        # TAB 2: COMPARABLE COMPANY ANALYSIS
         # ----------------------------------------------------
         with tab_comps:
             st.subheader("Relative Valuation Matrix (Peer Comps)")
@@ -227,11 +273,13 @@ if search_button or raw_input:
             st.subheader("Structured 3-Scenario Free Cash Flow Engine")
             st.markdown("Calculates intrinsic asset value by applying user-defined growth pathways to trailing operational cash flows.")
             
-            raw_rev = info.get('totalRevenue', 1000000000)
-            raw_fcf = info.get('freeCashflow', raw_rev * 0.10)
+            raw_rev = deep_metrics.get('revenue')
+            raw_rev = raw_rev if raw_rev else 1000000000
+            
+            raw_fcf = deep_metrics.get('fcf')
             fcf_base_millions = float(raw_fcf / 1000000) if raw_fcf else (raw_rev * 0.12) / 1000000
             
-            st.markdown(f"**Baseline Parameter:** TTM Free Cash Flow captured at **{curr_sym}{fcf_base_millions:.2f} Million**.")
+            st.markdown(f"**Baseline Parameter:** TTM Free Cash Flow captured at **{curr_sym}{fcf_base_millions:,.2f} Million**.")
             
             dcf_col1, dcf_col2, dcf_col3 = st.columns(3)
             wacc_input = dcf_col1.slider("Discount Rate (WACC %)", 6.0, 16.0, 10.0, step=0.5) / 100
@@ -281,12 +329,12 @@ if search_button or raw_input:
             st.subheader("3-Stage DuPont Accounting Deconstruction")
             st.markdown("Deconstructs corporate Return on Equity (ROE) to evaluate if returns are driven by profitability, operational velocity, or financial leverage.")
             
-            net_income = info.get('netIncomeToCommon', None)
-            total_assets = info.get('totalAssets', None)
-            total_equity = info.get('totalStockholderEquity', None)
-            revenue = info.get('totalRevenue', None)
+            net_income = deep_metrics.get('net_income')
+            total_assets = deep_metrics.get('total_assets')
+            total_equity = deep_metrics.get('total_equity')
+            revenue = deep_metrics.get('revenue')
             
-            if net_income and total_assets and total_equity and revenue:
+            if net_income and total_assets and total_equity and revenue and total_assets > 0 and total_equity > 0 and revenue > 0:
                 net_profit_margin = net_income / revenue
                 asset_turnover = revenue / total_assets
                 equity_multiplier = total_assets / total_equity
@@ -304,4 +352,4 @@ if search_button or raw_input:
                 else:
                     st.success("✅ Operational Health: The corporate leverage profile is balanced, showing that returns are backed by functional operational assets rather than aggressive financial engineering.")
             else:
-                st.warning("Complete financial statements are missing for this specific ticker code profile to calculate a full 3-Stage DuPont deconstruction.")
+                st.warning("Corporate accounting data has been throttled or restricted by the global database API for this specific ticker. Deep metrics cannot be resolved.")
