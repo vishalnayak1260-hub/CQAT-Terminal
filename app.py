@@ -9,7 +9,20 @@ import requests
 from database_core import Base, Company, MarketData
 
 # ==========================================
-# 1. PAGE CONFIGURATION & STYLING
+# 1. NETWORKING & FIREWALL BYPASS CONFIG
+# ==========================================
+# This creates a spoofed browser session so Render looks like a home laptop to Yahoo
+custom_session = requests.Session()
+custom_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Origin': 'https://finance.yahoo.com',
+    'Referer': 'https://finance.yahoo.com/'
+})
+
+# ==========================================
+# 2. PAGE CONFIGURATION & STYLING
 # ==========================================
 st.set_page_config(page_title="Junior Analyst Terminal", page_icon="💼", layout="wide")
 
@@ -28,7 +41,7 @@ st.markdown("Enterprise Multi-Strategy Valuation & Financial Intelligence Worksp
 st.markdown("---")
 
 # ==========================================
-# 2. DATA PROCESSING & INGESTION ENGINE
+# 3. DATA PROCESSING & INGESTION ENGINE
 # ==========================================
 engine = create_engine('sqlite:///cqat_vault.db')
 Base.metadata.create_all(engine)
@@ -39,9 +52,9 @@ def resolve_company_name(query):
     if not clean_query:
         return ""
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_query}"
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        response = requests.get(url, headers=headers, timeout=5)
+        # Use the spoofed session and set a strict 5-second timeout
+        response = custom_session.get(url, timeout=5)
         data = response.json()
         if 'quotes' in data and len(data['quotes']) > 0:
             for quote in data['quotes']:
@@ -53,7 +66,6 @@ def resolve_company_name(query):
     return clean_query.upper()
 
 def extract_financial_statements(raw_ticker, info):
-    """Deep scraping engine to bypass stripped API dictionaries and pull raw accounting data."""
     metrics = {
         'revenue': info.get('totalRevenue'),
         'net_income': info.get('netIncomeToCommon'),
@@ -61,39 +73,26 @@ def extract_financial_statements(raw_ticker, info):
         'total_equity': info.get('totalStockholderEquity'),
         'fcf': info.get('freeCashflow')
     }
-    
     try:
-        # Pull raw statement dataframes
         inc = raw_ticker.financials
         bs = raw_ticker.balance_sheet
         cf = raw_ticker.cashflow
         
-        # Scrape Revenue
         if not inc.empty and metrics['revenue'] is None:
             for key in ['Total Revenue', 'Operating Revenue', 'Revenue']:
                 if key in inc.index: metrics['revenue'] = inc.loc[key].iloc[0]; break
-                    
-        # Scrape Net Income
         if not inc.empty and metrics['net_income'] is None:
             for key in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing And Discontinued Operation']:
                 if key in inc.index: metrics['net_income'] = inc.loc[key].iloc[0]; break
-                    
-        # Scrape Assets
         if not bs.empty and metrics['total_assets'] is None:
             if 'Total Assets' in bs.index: metrics['total_assets'] = bs.loc['Total Assets'].iloc[0]
-                
-        # Scrape Equity
         if not bs.empty and metrics['total_equity'] is None:
-            for key in ['Stockholders Equity', 'Common Stock Equity', 'Total Equity Gross Minority Interest']:
+            for key in ['Stockholders Equity', 'Common Stock Equity']:
                 if key in bs.index: metrics['total_equity'] = bs.loc[key].iloc[0]; break
-                    
-        # Scrape FCF
         if not cf.empty and metrics['fcf'] is None:
             if 'Free Cash Flow' in cf.index: metrics['fcf'] = cf.loc['Free Cash Flow'].iloc[0]
-                
     except Exception:
         pass
-        
     return metrics
 
 def fetch_and_store_financials(ticker_symbol):
@@ -104,7 +103,8 @@ def fetch_and_store_financials(ticker_symbol):
         return True
         
     try:
-        stock_info = yf.Ticker(ticker_symbol)
+        # Pass the custom browser session to yfinance
+        stock_info = yf.Ticker(ticker_symbol, session=custom_session)
         company_name = stock_info.info.get('shortName', ticker_symbol)
         sector = stock_info.info.get('sector', 'General')
         industry = stock_info.info.get('industry', 'General')
@@ -112,24 +112,23 @@ def fetch_and_store_financials(ticker_symbol):
         new_company = Company(ticker=ticker_symbol, company_name=company_name, sector=sector, industry=industry)
         session.add(new_company)
         
-        df = yf.download(ticker_symbol, period="1y", progress=False)
-        if df.empty:
-            session.close()
-            return False
-            
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-            
-        df['SMA_50'] = df['Close'].rolling(window=50).mean()
-        df['SMA_200'] = df['Close'].rolling(window=200).mean()
-        df = df.dropna()
+        # Enforce session and a strict timeout on data download
+        df = yf.download(ticker_symbol, period="1y", progress=False, session=custom_session, timeout=5)
         
-        records = [
-            MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), 
-                       volume=int(row['Volume']), sma_50=float(row['SMA_50']), sma_200=float(row['SMA_200']))
-            for index, row in df.iterrows()
-        ]
-        session.bulk_save_objects(records)
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df['SMA_50'] = df['Close'].rolling(window=50).mean()
+            df['SMA_200'] = df['Close'].rolling(window=200).mean()
+            df = df.dropna()
+            
+            records = [
+                MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), 
+                           volume=int(row['Volume']), sma_50=float(row['SMA_50']), sma_200=float(row['SMA_200']))
+                for index, row in df.iterrows()
+            ]
+            session.bulk_save_objects(records)
+            
         session.commit()
         session.close()
         return True
@@ -139,7 +138,7 @@ def fetch_and_store_financials(ticker_symbol):
         return False
 
 # ==========================================
-# 3. INTERFACE COMMAND SIDEBAR
+# 4. INTERFACE COMMAND SIDEBAR
 # ==========================================
 st.sidebar.header("Command Center")
 raw_input = st.sidebar.text_input("Target Asset Name / Ticker:", "Microsoft")
@@ -147,26 +146,26 @@ search_button = st.sidebar.button("Run Financial Intelligence Suite")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📐 Custom Peer Comps")
-st.sidebar.markdown("Enter plain company names or raw codes separated by commas:")
 peer_input = st.sidebar.text_input("Peer Tickers / Names:", "Apple, Google, Amazon")
 
 # ==========================================
-# 4. EXECUTION MATRIX
+# 5. EXECUTION MATRIX
 # ==========================================
 if search_button or raw_input:
     selected_ticker = resolve_company_name(raw_input)
     
-    if fetch_and_store_financials(selected_ticker):
+    with st.spinner(f"Connecting to data matrix for {selected_ticker}..."):
+        is_success = fetch_and_store_financials(selected_ticker)
+    
+    if is_success:
         df_market = pd.read_sql(f"SELECT * FROM fact_market WHERE ticker = '{selected_ticker}'", engine)
         
         try:
-            raw_ticker = yf.Ticker(selected_ticker)
+            raw_ticker = yf.Ticker(selected_ticker, session=custom_session)
             info = raw_ticker.info
             full_name = info.get('longName', info.get('shortName', selected_ticker))
             currency = info.get('currency', 'USD')
             curr_sym = "₹" if currency == "INR" else "$"
-            
-            # Execute the deep extraction engine
             deep_metrics = extract_financial_statements(raw_ticker, info)
         except:
             info = {}
@@ -185,9 +184,6 @@ if search_button or raw_input:
             "🔍 DuPont Profitability Analysis"
         ])
         
-        # ----------------------------------------------------
-        # TAB 1: MARKET PERFORMANCE & MULTIPLES
-        # ----------------------------------------------------
         with tab_market:
             if not df_market.empty:
                 current_price = df_market['close_price'].iloc[-1]
@@ -207,76 +203,50 @@ if search_button or raw_input:
                                     color_discrete_sequence=['#3b82f6', '#ef4444', '#10b981'])
                 fig_price.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', xaxis_title="Date", yaxis_title=f"Price ({currency})")
                 st.plotly_chart(fig_price, width='stretch')
+            else:
+                st.warning("⚠️ API Notice: Historical price charts are temporarily unavailable on this cloud node. Fundamental matrix tools below remain fully active.")
                 
-                st.subheader("Valuation Summary Multiples")
-                f_col1, f_col2, f_col3, f_col4 = st.columns(4)
-                f_col1.metric("Trailing P/E Ratio", f"{info.get('trailingPE', 0):.2f}x" if info.get('trailingPE') else "N/A")
-                f_col2.metric("EV / EBITDA", f"{info.get('enterpriseToEbitda', 0):.2f}x" if info.get('enterpriseToEbitda') else "N/A")
-                f_col3.metric("Earnings Per Share (EPS)", f"{curr_sym}{info.get('trailingEps', 0):.2f}" if info.get('trailingEps') else "N/A")
-                f_col4.metric("Price-to-Book (P/B)", f"{info.get('priceToBook', 0):.2f}x" if info.get('priceToBook') else "N/A")
+            st.subheader("Valuation Summary Multiples")
+            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+            f_col1.metric("Trailing P/E Ratio", f"{info.get('trailingPE', 0):.2f}x" if info.get('trailingPE') else "N/A")
+            f_col2.metric("EV / EBITDA", f"{info.get('enterpriseToEbitda', 0):.2f}x" if info.get('enterpriseToEbitda') else "N/A")
+            f_col3.metric("Earnings Per Share (EPS)", f"{curr_sym}{info.get('trailingEps', 0):.2f}" if info.get('trailingEps') else "N/A")
+            f_col4.metric("Price-to-Book (P/B)", f"{info.get('priceToBook', 0):.2f}x" if info.get('priceToBook') else "N/A")
 
-        # ----------------------------------------------------
-        # TAB 2: COMPARABLE COMPANY ANALYSIS
-        # ----------------------------------------------------
         with tab_comps:
             st.subheader("Relative Valuation Matrix (Peer Comps)")
-            st.markdown("Compares corporate multiples to identify relative market premiums or discount entry points.")
-            
             raw_peer_strings = [p.strip() for p in peer_input.split(",") if p.strip()]
             resolved_peers = []
-            
-            with st.spinner("Resolving peer identities..."):
-                for raw_p in raw_peer_strings:
-                    ticker_resolved = resolve_company_name(raw_p)
-                    if ticker_resolved and ticker_resolved not in resolved_peers:
-                        resolved_peers.append(ticker_resolved)
+            for raw_p in raw_peer_strings:
+                ticker_resolved = resolve_company_name(raw_p)
+                if ticker_resolved and ticker_resolved not in resolved_peers:
+                    resolved_peers.append(ticker_resolved)
             
             all_tickers_to_compare = [selected_ticker] + resolved_peers
             st.caption(f"Active Peer Tracking Array: {', '.join(all_tickers_to_compare)}")
             
             comps_data = []
-            with st.spinner("Extracting operational metrics across peer group..."):
-                for t in all_tickers_to_compare:
-                    try:
-                        p_ticker = yf.Ticker(t)
-                        p_info = p_ticker.info
-                        comps_data.append({
-                            "Ticker": t,
-                            "Company Name": p_info.get('shortName', t),
-                            "P/E Ratio": p_info.get('trailingPE', None),
-                            "EV/EBITDA": p_info.get('enterpriseToEbitda', None),
-                            "P/B Ratio": p_info.get('priceToBook', None),
-                            "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None
-                        })
-                    except:
-                        pass
-            
+            for t in all_tickers_to_compare:
+                try:
+                    p_ticker = yf.Ticker(t, session=custom_session)
+                    p_info = p_ticker.info
+                    comps_data.append({
+                        "Ticker": t, "Company Name": p_info.get('shortName', t),
+                        "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None),
+                        "P/B Ratio": p_info.get('priceToBook', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None
+                    })
+                except:
+                    pass
             if comps_data:
                 df_comps = pd.DataFrame(comps_data)
                 st.dataframe(df_comps.style.highlight_max(axis=0, subset=['Net Margin (%)']).format({
                     "P/E Ratio": "{:.2f}x", "EV/EBITDA": "{:.2f}x", "P/B Ratio": "{:.2f}x", "Net Margin (%)": "{:.2f}%"
                 }), use_container_width=True)
-                
-                try:
-                    avg_pe = df_comps["P/E Ratio"].mean()
-                    target_pe = df_comps[df_comps["Ticker"] == selected_ticker]["P/E Ratio"].values[0]
-                    if target_pe and avg_pe:
-                        variance = ((target_pe - avg_pe) / avg_pe) * 100
-                        status_label = "Premium" if variance > 0 else "Discount"
-                        st.info(f"💡 Analytics Insight: **{selected_ticker}** trades at a **{abs(variance):.1f}% {status_label}** relative to the specified peer group average P/E of **{avg_pe:.2f}x**.")
-                except:
-                    pass
 
-        # ----------------------------------------------------
-        # TAB 3: INTRINSIC 3-SCENARIO DCF MODEL
-        # ----------------------------------------------------
         with tab_dcf:
             st.subheader("Structured 3-Scenario Free Cash Flow Engine")
-            st.markdown("Calculates intrinsic asset value by applying user-defined growth pathways to trailing operational cash flows.")
-            
             raw_rev = deep_metrics.get('revenue')
             raw_rev = raw_rev if raw_rev else 1000000000
-            
             raw_fcf = deep_metrics.get('fcf')
             fcf_base_millions = float(raw_fcf / 1000000) if raw_fcf else (raw_rev * 0.12) / 1000000
             
@@ -285,16 +255,10 @@ if search_button or raw_input:
             dcf_col1, dcf_col2, dcf_col3 = st.columns(3)
             wacc_input = dcf_col1.slider("Discount Rate (WACC %)", 6.0, 16.0, 10.0, step=0.5) / 100
             terminal_growth = dcf_col2.slider("Terminal Perpetuity Growth (% Growth)", 1.0, 6.0, 4.0, step=0.2) / 100
-            
             shares_raw = info.get('sharesOutstanding', 50000000)
             shares_outstanding = dcf_col3.number_input("Shares Outstanding (Millions)", value=float(shares_raw / 1000000) if shares_raw else 100.0, min_value=1.0)
             
-            scenarios = {
-                "Bear Case (Conservative)": {"growth": 0.04, "color": "#ef4444"},
-                "Base Case (Market Consensus)": {"growth": 0.08, "color": "#3b82f6"},
-                "Bull Case (Aggressive Expansion)": {"growth": 0.14, "color": "#10b981"}
-            }
-            
+            scenarios = {"Bear Case (Conservative)": {"growth": 0.04, "color": "#ef4444"}, "Base Case (Market Consensus)": {"growth": 0.08, "color": "#3b82f6"}, "Bull Case (Aggressive Expansion)": {"growth": 0.14, "color": "#10b981"}}
             dcf_results = {}
             for name, config in scenarios.items():
                 g = config["growth"]
@@ -302,18 +266,13 @@ if search_button or raw_input:
                 pv_cfs = [projected_cfs[t] / ((1 + wacc_input) ** (t + 1)) for t in range(5)]
                 terminal_value = (projected_cfs[-1] * (1 + terminal_growth)) / (wacc_input - terminal_growth)
                 pv_terminal_value = terminal_value / ((1 + wacc_input) ** 5)
-                
                 total_intrinsic_value = sum(pv_cfs) + pv_terminal_value
-                per_share_target = total_intrinsic_value / shares_outstanding
-                dcf_results[name] = per_share_target
+                dcf_results[name] = total_intrinsic_value / shares_outstanding
             
-            df_dcf_plot = pd.DataFrame(list(dcf_results.items()), columns=["Scenario", "Target Price Per Share"])
-            fig_dcf = px.bar(df_dcf_plot, x="Scenario", y="Target Price Per Share", text_auto=".2f",
-                             title="Calculated Intrinsic Target Values Across Strategic Corporate Scenarios",
-                             color="Scenario", color_discrete_map={k: v["color"] for k, v in scenarios.items()})
+            fig_dcf = px.bar(pd.DataFrame(list(dcf_results.items()), columns=["Scenario", "Target Price Per Share"]), x="Scenario", y="Target Price Per Share", text_auto=".2f", color="Scenario", color_discrete_map={k: v["color"] for k, v in scenarios.items()})
             st.plotly_chart(fig_dcf, width='stretch')
             
-            c_price = df_market['close_price'].iloc[-1]
+            c_price = df_market['close_price'].iloc[-1] if not df_market.empty else info.get('currentPrice', info.get('previousClose', 1.0))
             st.markdown(f"**Current Market Trading Price:** {curr_sym}{c_price:.2f}")
             
             dcf_metrics_cols = st.columns(3)
@@ -323,34 +282,23 @@ if search_button or raw_input:
                 dcf_metrics_cols[idx].metric(name, f"{curr_sym}{val:.2f}", f"{upside:+.1f}% Implied Edge")
                 idx += 1
 
-        # ----------------------------------------------------
-        # TAB 4: DUPONT PROFITABILITY ANALYSIS
-        # ----------------------------------------------------
         with tab_dupont:
             st.subheader("3-Stage DuPont Accounting Deconstruction")
-            st.markdown("Deconstructs corporate Return on Equity (ROE) to evaluate if returns are driven by profitability, operational velocity, or financial leverage.")
-            
-            net_income = deep_metrics.get('net_income')
-            total_assets = deep_metrics.get('total_assets')
-            total_equity = deep_metrics.get('total_equity')
-            revenue = deep_metrics.get('revenue')
+            net_income, total_assets, total_equity, revenue = deep_metrics.get('net_income'), deep_metrics.get('total_assets'), deep_metrics.get('total_equity'), deep_metrics.get('revenue')
             
             if net_income and total_assets and total_equity and revenue and total_assets > 0 and total_equity > 0 and revenue > 0:
-                net_profit_margin = net_income / revenue
-                asset_turnover = revenue / total_assets
-                equity_multiplier = total_assets / total_equity
+                net_profit_margin, asset_turnover, equity_multiplier = net_income / revenue, revenue / total_assets, total_assets / total_equity
                 calculated_roe = net_profit_margin * asset_turnover * equity_multiplier
                 
                 dp_col1, dp_col2, dp_col3, dp_col4 = st.columns(4)
-                dp_col1.metric("Net Profit Margin (Efficiency)", f"{net_profit_margin * 100:.2f}%")
-                dp_col2.metric("Asset Turnover (Operational Speed)", f"{asset_turnover:.2f}x")
-                dp_col3.metric("Equity Multiplier (Financial Leverage)", f"{equity_multiplier:.2f}x")
-                dp_col4.metric("Deconstructed Return on Equity", f"{calculated_roe * 100:.2f}%")
+                dp_col1.metric("Net Profit Margin", f"{net_profit_margin * 100:.2f}%")
+                dp_col2.metric("Asset Turnover", f"{asset_turnover:.2f}x")
+                dp_col3.metric("Equity Multiplier", f"{equity_multiplier:.2f}x")
+                dp_col4.metric("Deconstructed ROE", f"{calculated_roe * 100:.2f}%")
                 
-                st.markdown(" ")
-                if equity_multiplier > 2.5:
-                    st.warning("⚠️ Risk Warning: This business demonstrates a high Equity Multiplier. A significant portion of its structural return vector is driven by capital structure debt leverage rather than pure manufacturing or commercial pricing power margins.")
-                else:
-                    st.success("✅ Operational Health: The corporate leverage profile is balanced, showing that returns are backed by functional operational assets rather than aggressive financial engineering.")
+                if equity_multiplier > 2.5: st.warning("⚠️ Risk Warning: High Equity Multiplier implies heavy leverage.")
+                else: st.success("✅ Operational Health: Corporate leverage is balanced.")
             else:
-                st.warning("Corporate accounting data has been throttled or restricted by the global database API for this specific ticker. Deep metrics cannot be resolved.")
+                st.warning("Financial disclosure data throttled on this cloud server node.")
+    else:
+        st.error("🚨 Cloud Firewall Block: Yahoo Finance rejected or timed out the connection to the hosting server. Consider executing via local runtime environment.")
