@@ -7,6 +7,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import yfinance as yf
 import requests
+from fpdf import FPDF
+import scipy.stats as si
 from database_core import Base, Company, MarketData
 
 # ==========================================
@@ -51,10 +53,8 @@ def get_search_candidates(query):
                     name = quote.get('shortname', quote.get('longname', 'Unknown Name'))
                     symbol = quote.get('symbol', '')
                     exch = quote.get('exchange', 'Unknown Exchange')
-                    display_string = f"{name} ({symbol}) - {exch}"
-                    candidates.append({"display": display_string, "symbol": symbol})
-    except Exception:
-        pass
+                    candidates.append({"display": f"{name} ({symbol}) - {exch}", "symbol": symbol})
+    except Exception: pass
     if not candidates:
         raw = clean_query.upper().replace(" ", "")
         candidates.append({"display": f"Exact Ticker Match: {raw}", "symbol": raw})
@@ -75,22 +75,14 @@ def fetch_and_store_financials(ticker_symbol):
             session.close()
             return False
         stock_info = yf.Ticker(ticker_symbol)
-        company_name = stock_info.info.get('shortName', ticker_symbol)
-        sector = stock_info.info.get('sector', 'General')
-        industry = stock_info.info.get('industry', 'General')
-        new_company = Company(ticker=ticker_symbol, company_name=company_name, sector=sector, industry=industry)
+        new_company = Company(ticker=ticker_symbol, company_name=stock_info.info.get('shortName', ticker_symbol), sector=stock_info.info.get('sector', 'General'), industry=stock_info.info.get('industry', 'General'))
         session.add(new_company)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        df['SMA_50'] = df['Close'].rolling(window=50).mean()
-        df['SMA_200'] = df['Close'].rolling(window=200).mean()
+        df['SMA_50'], df['SMA_200'] = df['Close'].rolling(window=50).mean(), df['Close'].rolling(window=200).mean()
         df = df.dropna()
         session.query(MarketData).filter_by(ticker=ticker_symbol).delete()
-        records = [
-            MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), 
-                       volume=int(row['Volume']), sma_50=float(row['SMA_50']), sma_200=float(row['SMA_200']))
-            for index, row in df.iterrows()
-        ]
+        records = [MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), volume=int(row['Volume']), sma_50=float(row['SMA_50']), sma_200=float(row['SMA_200'])) for index, row in df.iterrows()]
         session.bulk_save_objects(records)
         session.commit()
         session.close()
@@ -101,37 +93,79 @@ def fetch_and_store_financials(ticker_symbol):
         return False
 
 def extract_financial_statements(raw_ticker, info):
-    metrics = {
-        'revenue': info.get('totalRevenue'), 'net_income': info.get('netIncomeToCommon'),
-        'total_assets': info.get('totalAssets'), 'total_equity': info.get('totalStockholderEquity'),
-        'fcf': info.get('freeCashflow')
-    }
+    metrics = {'revenue': info.get('totalRevenue'), 'net_income': info.get('netIncomeToCommon'), 'total_assets': info.get('totalAssets'), 'total_equity': info.get('totalStockholderEquity'), 'fcf': info.get('freeCashflow')}
     try:
-        inc = raw_ticker.financials
-        bs = raw_ticker.balance_sheet
-        cf = raw_ticker.cashflow
+        inc, bs, cf = raw_ticker.financials, raw_ticker.balance_sheet, raw_ticker.cashflow
         if not inc.empty and metrics['revenue'] is None:
-            for key in ['Total Revenue', 'Operating Revenue', 'Revenue']:
-                if key in inc.index: metrics['revenue'] = inc.loc[key].iloc[0]; break
+            for k in ['Total Revenue', 'Operating Revenue', 'Revenue']:
+                if k in inc.index: metrics['revenue'] = inc.loc[k].iloc[0]; break
         if not inc.empty and metrics['net_income'] is None:
-            for key in ['Net Income', 'Net Income Common Stockholders']:
-                if key in inc.index: metrics['net_income'] = inc.loc[key].iloc[0]; break
+            for k in ['Net Income', 'Net Income Common Stockholders']:
+                if k in inc.index: metrics['net_income'] = inc.loc[k].iloc[0]; break
         if not bs.empty and metrics['total_assets'] is None:
             if 'Total Assets' in bs.index: metrics['total_assets'] = bs.loc['Total Assets'].iloc[0]
         if not bs.empty and metrics['total_equity'] is None:
-            for key in ['Stockholders Equity', 'Common Stock Equity']:
-                if key in bs.index: metrics['total_equity'] = bs.loc[key].iloc[0]; break
+            for k in ['Stockholders Equity', 'Common Stock Equity']:
+                if k in bs.index: metrics['total_equity'] = bs.loc[k].iloc[0]; break
         if not cf.empty and metrics['fcf'] is None:
             if 'Free Cash Flow' in cf.index: metrics['fcf'] = cf.loc['Free Cash Flow'].iloc[0]
-    except Exception:
-        pass
+    except Exception: pass
     return metrics
+
+def generate_pdf_report(ticker, full_name, sector, curr_sym, c_price, info, dcf_results, dupont):
+    pdf_sym = "INR " if curr_sym == "₹" else curr_sym
+    safe_name = full_name.encode('latin-1', 'ignore').decode('latin-1')
+    safe_sector = sector.encode('latin-1', 'ignore').decode('latin-1')
+    
+    pdf = FPDF()
+    pdf.add_page()
+    
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, f"INSTITUTIONAL TEAR SHEET: {safe_name} ({ticker})", ln=True, align='C')
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(0, 6, f"Sector: {safe_sector}  |  Currency: {pdf_sym.strip()}", ln=True, align='C')
+    pdf.line(10, 30, 200, 30)
+    pdf.ln(10)
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "1. Market Overview & Multiples", ln=True)
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(95, 6, f"Current Trading Price: {pdf_sym}{c_price:.2f}")
+    pdf.cell(95, 6, f"Systematic Risk (Beta): {info.get('beta', 'N/A')}", ln=True)
+    pdf.cell(95, 6, f"Trailing P/E Ratio: {info.get('trailingPE', 'N/A')}x")
+    pdf.cell(95, 6, f"Price-to-Book (P/B): {info.get('priceToBook', 'N/A')}x", ln=True)
+    pdf.cell(95, 6, f"EV/EBITDA: {info.get('enterpriseToEbitda', 'N/A')}x", ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "2. Intrinsic Valuation (DCF 3-Scenario Analysis)", ln=True)
+    pdf.set_font("Arial", '', 10)
+    for scenario, price in dcf_results.items():
+        upside = ((price - c_price) / c_price) * 100 if c_price > 0 else 0
+        pdf.cell(0, 6, f"{scenario}: {pdf_sym}{price:.2f} per share (Implied Edge: {upside:+.1f}%)", ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "3. DuPont Operational Breakdown", ln=True)
+    pdf.set_font("Arial", '', 10)
+    if dupont['valid']:
+        pdf.cell(95, 6, f"Net Profit Margin: {dupont['npm']:.2f}%")
+        pdf.cell(95, 6, f"Asset Turnover: {dupont['ato']:.2f}x", ln=True)
+        pdf.cell(95, 6, f"Equity Multiplier (Leverage): {dupont['em']:.2f}x")
+        pdf.cell(95, 6, f"Deconstructed ROE: {dupont['roe']:.2f}%", ln=True)
+    else:
+        pdf.cell(0, 6, "Insufficient fundamental data to generate DuPont breakdown.", ln=True)
+        
+    pdf.ln(20)
+    pdf.set_font("Arial", 'I', 8)
+    pdf.cell(0, 6, "Generated automatically via the Quantitative Asset Terminal. Not financial advice.", align='C')
+    
+    return pdf.output(dest='S').encode('latin-1')
 
 # ==========================================
 # 3. INTERFACE COMMAND SIDEBAR
 # ==========================================
 st.sidebar.header("Command Center")
-
 raw_input = st.sidebar.text_input("1. Search Keyword or Brand:", "Tata")
 selected_ticker = None
 if raw_input:
@@ -141,10 +175,9 @@ if raw_input:
         selection = st.sidebar.selectbox("2. Select Exact Market Asset:", list(options_dict.keys()))
         selected_ticker = options_dict[selection]
     else:
-        st.sidebar.warning("No public market matches found for that keyword.")
+        st.sidebar.warning("No public market matches found.")
 
 search_button = st.sidebar.button("3. Run Financial Intelligence Suite")
-
 st.sidebar.markdown("---")
 st.sidebar.subheader("📐 Custom Peer Comps")
 peer_input = st.sidebar.text_input("Peer Tickers / Names:", "Mahindra, Reliance, Infosys")
@@ -163,44 +196,52 @@ if search_button and selected_ticker:
             raw_ticker = yf.Ticker(selected_ticker)
             info = raw_ticker.info
             full_name = info.get('longName', info.get('shortName', selected_ticker))
-            currency = info.get('currency', 'USD')
-            curr_sym = "₹" if currency == "INR" else "$"
+            currency, curr_sym = info.get('currency', 'USD'), "₹" if info.get('currency') == "INR" else "$"
             deep_metrics = extract_financial_statements(raw_ticker, info)
         except:
-            info = {}
-            full_name = selected_ticker
-            currency = "USD"
-            curr_sym = "$"
+            info, full_name, currency, curr_sym = {}, selected_ticker, "USD", "$"
             deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None}
 
-        st.header(f"{full_name} ({selected_ticker})")
-        st.markdown(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')} | **Exchange:** {info.get('exchange', 'N/A')}")
+        current_price = df_market['close_price'].iloc[-1] if not df_market.empty else info.get('currentPrice', 1.0)
         
-        tab_market, tab_comps, tab_dcf, tab_dupont, tab_mpt = st.tabs([
-            "📈 Market Performance", 
-            "📊 Peer Benchmarking", 
-            "🔮 DCF Valuation",
-            "🔍 DuPont Analysis",
-            "⚖️ Quant Portfolio Optimizer"
+        raw_rev, raw_fcf = deep_metrics.get('revenue', 1000000000), deep_metrics.get('fcf')
+        fcf_base = float(raw_fcf / 1000000) if raw_fcf else (raw_rev * 0.12) / 1000000
+        shares = float(info.get('sharesOutstanding', 100000000) / 1000000)
+        wacc, t_growth = 0.10, 0.04
+        scenarios = {"Bear Case": 0.04, "Base Case": 0.08, "Bull Case": 0.14}
+        dcf_results = {}
+        for n, g in scenarios.items():
+            cfs = [fcf_base * ((1 + g) ** y) for y in range(1, 6)]
+            pv = sum([cfs[t] / ((1 + wacc) ** (t + 1)) for t in range(5)])
+            tv = (cfs[-1] * (1 + t_growth)) / (wacc - t_growth)
+            dcf_results[n] = (pv + (tv / ((1 + wacc) ** 5))) / shares
+
+        ni, ta, te, rev = deep_metrics['net_income'], deep_metrics['total_assets'], deep_metrics['total_equity'], deep_metrics['revenue']
+        dupont_data = {'valid': False}
+        if ni and ta and te and rev and ta > 0 and te > 0 and rev > 0:
+            dupont_data = {'valid': True, 'npm': (ni/rev)*100, 'ato': rev/ta, 'em': ta/te, 'roe': (ni/rev)*(rev/ta)*(ta/te)*100}
+
+        col_head, col_btn = st.columns([3, 1])
+        with col_head:
+            st.header(f"{full_name} ({selected_ticker})")
+            st.markdown(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')} | **Exchange:** {info.get('exchange', 'N/A')}")
+        with col_btn:
+            pdf_bytes = generate_pdf_report(selected_ticker, full_name, info.get('sector', 'N/A'), curr_sym, current_price, info, dcf_results, dupont_data)
+            st.download_button(label="📥 Export PDF Tear Sheet", data=pdf_bytes, file_name=f"{selected_ticker}_Tear_Sheet.pdf", mime="application/pdf")
+        
+        tab_market, tab_comps, tab_dcf, tab_dupont, tab_mpt, tab_bs = st.tabs([
+            "📈 Market Performance", "📊 Peer Benchmarking", "🔮 DCF Valuation", "🔍 DuPont Analysis", "⚖️ Quant Portfolio Optimizer", "🧮 Options (Black-Scholes)"
         ])
         
         with tab_market:
             if not df_market.empty:
-                current_price = df_market['close_price'].iloc[-1]
-                volume = df_market['volume'].iloc[-1]
-                raw_cap = info.get('marketCap', 0)
-                market_cap_formatted = f"{curr_sym}{raw_cap / 1000000000:.2f} B" if raw_cap else "N/A"
-                beta_val = info.get('beta', 1.0)
-                
                 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
                 m_col1.metric("Latest Close Price", f"{curr_sym}{current_price:.2f}")
-                m_col2.metric("Trading Volume", f"{volume:,}")
-                m_col3.metric("Total Market Cap", market_cap_formatted)
-                m_col4.metric("Systematic Risk (Beta)", f"{beta_val:.2f}")
+                m_col2.metric("Trading Volume", f"{df_market['volume'].iloc[-1]:,}")
+                m_col3.metric("Total Market Cap", f"{curr_sym}{info.get('marketCap', 0) / 1000000000:.2f} B" if info.get('marketCap') else "N/A")
+                m_col4.metric("Systematic Risk (Beta)", f"{info.get('beta', 1.0):.2f}")
                 
-                fig_price = px.line(df_market, x='date', y=['close_price', 'sma_50', 'sma_200'], 
-                                    title="Price Action Vector vs Moving Average Support Levels",
-                                    color_discrete_sequence=['#3b82f6', '#ef4444', '#10b981'])
+                fig_price = px.line(df_market, x='date', y=['close_price', 'sma_50', 'sma_200'], title="Price Action Vector vs Moving Average Support Levels", color_discrete_sequence=['#3b82f6', '#ef4444', '#10b981'])
                 fig_price.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', xaxis_title="Date", yaxis_title=f"Price ({currency})")
                 st.plotly_chart(fig_price, width='stretch')
                 
@@ -213,158 +254,108 @@ if search_button and selected_ticker:
 
         with tab_comps:
             st.subheader("Relative Valuation Matrix (Peer Comps)")
-            raw_peer_strings = [p.strip() for p in peer_input.split(",") if p.strip()]
             resolved_peers = []
-            
             with st.spinner("Resolving exact peer identities..."):
-                for raw_p in raw_peer_strings:
+                for raw_p in [p.strip() for p in peer_input.split(",") if p.strip()]:
                     p_cands = get_search_candidates(raw_p)
-                    if p_cands:
-                        best_match = p_cands[0]['symbol']
-                        if best_match not in resolved_peers and best_match != selected_ticker:
-                            resolved_peers.append(best_match)
+                    if p_cands and p_cands[0]['symbol'] not in resolved_peers and p_cands[0]['symbol'] != selected_ticker:
+                        resolved_peers.append(p_cands[0]['symbol'])
             
             all_tickers_to_compare = [selected_ticker] + resolved_peers
             st.caption(f"Active Peer Tracking Array: {', '.join(all_tickers_to_compare)}")
             
             comps_data = []
-            with st.spinner("Extracting operational metrics across peer group..."):
-                for t in all_tickers_to_compare:
-                    try:
-                        p_ticker = yf.Ticker(t)
-                        p_info = p_ticker.info
-                        comps_data.append({
-                            "Ticker": t, "Company Name": p_info.get('shortName', t),
-                            "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None),
-                            "P/B Ratio": p_info.get('priceToBook', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None
-                        })
-                    except:
-                        pass
+            for t in all_tickers_to_compare:
+                try:
+                    p_info = yf.Ticker(t).info
+                    comps_data.append({"Ticker": t, "Company Name": p_info.get('shortName', t), "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None), "P/B Ratio": p_info.get('priceToBook', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None})
+                except: pass
             if comps_data:
-                df_comps = pd.DataFrame(comps_data)
-                st.dataframe(df_comps.style.highlight_max(axis=0, subset=['Net Margin (%)']).format({
-                    "P/E Ratio": "{:.2f}x", "EV/EBITDA": "{:.2f}x", "P/B Ratio": "{:.2f}x", "Net Margin (%)": "{:.2f}%"
-                }), use_container_width=True)
+                st.dataframe(pd.DataFrame(comps_data).style.highlight_max(axis=0, subset=['Net Margin (%)']).format({"P/E Ratio": "{:.2f}x", "EV/EBITDA": "{:.2f}x", "P/B Ratio": "{:.2f}x", "Net Margin (%)": "{:.2f}%"}), use_container_width=True)
 
         with tab_dcf:
             st.subheader("Structured 3-Scenario Free Cash Flow Engine")
-            raw_rev = deep_metrics.get('revenue')
-            raw_rev = raw_rev if raw_rev else 1000000000
-            raw_fcf = deep_metrics.get('fcf')
-            fcf_base_millions = float(raw_fcf / 1000000) if raw_fcf else (raw_rev * 0.12) / 1000000
-            
-            st.markdown(f"**Baseline Parameter:** TTM Free Cash Flow captured at **{curr_sym}{fcf_base_millions:,.2f} Million**.")
-            
-            dcf_col1, dcf_col2, dcf_col3 = st.columns(3)
-            wacc_input = dcf_col1.slider("Discount Rate (WACC %)", 6.0, 16.0, 10.0, step=0.5) / 100
-            terminal_growth = dcf_col2.slider("Terminal Perpetuity Growth (% Growth)", 1.0, 6.0, 4.0, step=0.2) / 100
-            shares_raw = info.get('sharesOutstanding', 50000000)
-            shares_outstanding = dcf_col3.number_input("Shares Outstanding (Millions)", value=float(shares_raw / 1000000) if shares_raw else 100.0, min_value=1.0)
-            
-            scenarios = {"Bear Case (Conservative)": {"growth": 0.04, "color": "#ef4444"}, "Base Case (Market Consensus)": {"growth": 0.08, "color": "#3b82f6"}, "Bull Case (Aggressive Expansion)": {"growth": 0.14, "color": "#10b981"}}
-            dcf_results = {}
-            for name, config in scenarios.items():
-                g = config["growth"]
-                projected_cfs = [fcf_base_millions * ((1 + g) ** year) for year in range(1, 6)]
-                pv_cfs = [projected_cfs[t] / ((1 + wacc_input) ** (t + 1)) for t in range(5)]
-                terminal_value = (projected_cfs[-1] * (1 + terminal_growth)) / (wacc_input - terminal_growth)
-                pv_terminal_value = terminal_value / ((1 + wacc_input) ** 5)
-                total_intrinsic_value = sum(pv_cfs) + pv_terminal_value
-                dcf_results[name] = total_intrinsic_value / shares_outstanding
-            
-            fig_dcf = px.bar(pd.DataFrame(list(dcf_results.items()), columns=["Scenario", "Target Price Per Share"]), x="Scenario", y="Target Price Per Share", text_auto=".2f", color="Scenario", color_discrete_map={k: v["color"] for k, v in scenarios.items()})
-            st.plotly_chart(fig_dcf, width='stretch')
-            
-            c_price = df_market['close_price'].iloc[-1] if not df_market.empty else info.get('currentPrice', info.get('previousClose', 1.0))
-            st.markdown(f"**Current Market Trading Price:** {curr_sym}{c_price:.2f}")
-            
-            dcf_metrics_cols = st.columns(3)
-            idx = 0
-            for name, val in dcf_results.items():
-                upside = ((val - c_price) / c_price) * 100 if c_price > 0 else 0
-                dcf_metrics_cols[idx].metric(name, f"{curr_sym}{val:.2f}", f"{upside:+.1f}% Implied Edge")
-                idx += 1
+            st.markdown(f"**Baseline Parameter:** TTM Free Cash Flow captured at **{curr_sym}{fcf_base:,.2f} Million**.")
+            st.plotly_chart(px.bar(pd.DataFrame(list(dcf_results.items()), columns=["Scenario", "Target Price"]), x="Scenario", y="Target Price", text_auto=".2f", color="Scenario", color_discrete_map={"Bear Case": "#ef4444", "Base Case": "#3b82f6", "Bull Case": "#10b981"}), width='stretch')
+            st.markdown(f"**Current Market Trading Price:** {curr_sym}{current_price:.2f}")
 
         with tab_dupont:
             st.subheader("3-Stage DuPont Accounting Deconstruction")
-            net_income, total_assets, total_equity, revenue = deep_metrics.get('net_income'), deep_metrics.get('total_assets'), deep_metrics.get('total_equity'), deep_metrics.get('revenue')
-            
-            if net_income and total_assets and total_equity and revenue and total_assets > 0 and total_equity > 0 and revenue > 0:
-                net_profit_margin, asset_turnover, equity_multiplier = net_income / revenue, revenue / total_assets, total_assets / total_equity
-                calculated_roe = net_profit_margin * asset_turnover * equity_multiplier
-                
-                dp_col1, dp_col2, dp_col3, dp_col4 = st.columns(4)
-                dp_col1.metric("Net Profit Margin", f"{net_profit_margin * 100:.2f}%")
-                dp_col2.metric("Asset Turnover", f"{asset_turnover:.2f}x")
-                dp_col3.metric("Equity Multiplier", f"{equity_multiplier:.2f}x")
-                dp_col4.metric("Deconstructed ROE", f"{calculated_roe * 100:.2f}%")
-                
-                if equity_multiplier > 2.5: st.warning("⚠️ Risk Warning: High Equity Multiplier implies heavy leverage.")
-                else: st.success("✅ Operational Health: Corporate leverage is balanced.")
-            else:
-                st.warning("Accounting data for a full DuPont breakdown is missing for this ticker.")
-                
+            if dupont_data['valid']:
+                dp1, dp2, dp3, dp4 = st.columns(4)
+                dp1.metric("Net Profit Margin", f"{dupont_data['npm']:.2f}%")
+                dp2.metric("Asset Turnover", f"{dupont_data['ato']:.2f}x")
+                dp3.metric("Equity Multiplier", f"{dupont_data['em']:.2f}x")
+                dp4.metric("Deconstructed ROE", f"{dupont_data['roe']:.2f}%")
+                if dupont_data['em'] > 2.5: st.warning("⚠️ High Equity Multiplier implies heavy leverage.")
+                else: st.success("✅ Corporate leverage is balanced.")
+            else: st.warning("Accounting data missing for full DuPont breakdown.")
+
         with tab_mpt:
             st.subheader("Modern Portfolio Theory (MPT) Optimization")
-            st.markdown("Uses a Monte Carlo simulation (5,000 iterations) across the target asset and peer group to find the Mathematically Optimal Portfolio Weighting (Maximum Sharpe Ratio).")
-            
             if len(all_tickers_to_compare) >= 2:
-                with st.spinner("Downloading historical arrays and running Monte Carlo simulation..."):
-                    # 1. Download 2 years of data for all tickers
+                with st.spinner("Running Monte Carlo simulation..."):
                     mpt_data = yf.download(all_tickers_to_compare, period="2y", progress=False)['Close']
-                    
                     if not mpt_data.empty:
-                        # 2. Calculate Daily Returns and Annualize
-                        daily_returns = mpt_data.pct_change().dropna()
-                        annual_returns = daily_returns.mean() * 252
-                        cov_matrix = daily_returns.cov() * 252
-                        
-                        num_portfolios = 5000
-                        results = np.zeros((3, num_portfolios))
-                        weights_record = []
-                        
-                        # 3. Simulate 5,000 random weight combinations
-                        for i in range(num_portfolios):
-                            weights = np.random.random(len(all_tickers_to_compare))
-                            weights /= np.sum(weights)
-                            weights_record.append(weights)
-                            
-                            portfolio_return = np.sum(annual_returns * weights)
-                            portfolio_std_dev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-                            
-                            results[0,i] = portfolio_return
-                            results[1,i] = portfolio_std_dev
-                            results[2,i] = (portfolio_return - 0.04) / portfolio_std_dev # Assuming 4% Risk-Free Rate
-                            
-                        # 4. Find the portfolio with the highest Sharpe Ratio
-                        max_sharpe_idx = np.argmax(results[2])
-                        opt_return = results[0, max_sharpe_idx]
-                        opt_std = results[1, max_sharpe_idx]
-                        opt_sharpe = results[2, max_sharpe_idx]
-                        opt_weights = weights_record[max_sharpe_idx]
-                        
-                        mpt_col1, mpt_col2, mpt_col3 = st.columns(3)
-                        mpt_col1.metric("Expected Annual Return", f"{opt_return * 100:.2f}%")
-                        mpt_col2.metric("Expected Annual Risk (Volatility)", f"{opt_std * 100:.2f}%")
-                        mpt_col3.metric("Maximum Sharpe Ratio", f"{opt_sharpe:.2f}")
-                        
-                        # Plot the Efficient Frontier
-                        fig_mpt = px.scatter(
-                            x=results[1,:], y=results[0,:], color=results[2,:],
-                            labels={'x': 'Risk (Annualized Volatility)', 'y': 'Return (Annualized)', 'color': 'Sharpe Ratio'},
-                            title="The Efficient Frontier (5,000 Simulated Portfolios)",
-                            color_continuous_scale="Viridis"
-                        )
-                        # Add a star for the optimal portfolio
-                        fig_mpt.add_trace(go.Scatter(x=[opt_std], y=[opt_return], mode='markers', marker=dict(color='red', size=15, symbol='star'), name='Optimal Portfolio'))
+                        ret = mpt_data.pct_change().dropna()
+                        ann_ret, cov = ret.mean() * 252, ret.cov() * 252
+                        res, w_rec = np.zeros((3, 5000)), []
+                        for i in range(5000):
+                            w = np.random.random(len(all_tickers_to_compare)); w /= np.sum(w); w_rec.append(w)
+                            p_ret = np.sum(ann_ret * w); p_std = np.sqrt(np.dot(w.T, np.dot(cov, w)))
+                            res[0,i], res[1,i], res[2,i] = p_ret, p_std, (p_ret - 0.04) / p_std
+                        m_idx = np.argmax(res[2])
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Expected Annual Return", f"{res[0, m_idx] * 100:.2f}%")
+                        m2.metric("Expected Annual Risk", f"{res[1, m_idx] * 100:.2f}%")
+                        m3.metric("Max Sharpe Ratio", f"{res[2, m_idx]:.2f}")
+                        fig_mpt = px.scatter(x=res[1,:], y=res[0,:], color=res[2,:], labels={'x': 'Risk', 'y': 'Return', 'color': 'Sharpe'}, title="Efficient Frontier")
+                        fig_mpt.add_trace(go.Scatter(x=[res[1, m_idx]], y=[res[0, m_idx]], mode='markers', marker=dict(color='red', size=15, symbol='star'), name='Optimal'))
                         fig_mpt.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                         st.plotly_chart(fig_mpt, width='stretch')
-                        
-                        st.markdown("**Optimal Capital Allocation Weights:**")
-                        weight_df = pd.DataFrame({"Asset": all_tickers_to_compare, "Weighting": opt_weights})
-                        fig_weights = px.pie(weight_df, names="Asset", values="Weighting", hole=0.4, title="Mathematically Optimal Portfolio Distribution")
-                        st.plotly_chart(fig_weights, width='stretch')
-            else:
-                st.warning("Please enter at least one Custom Peer to run the Portfolio Optimization engine.")
+                        st.plotly_chart(px.pie(pd.DataFrame({"Asset": all_tickers_to_compare, "Weighting": w_rec[m_idx]}), names="Asset", values="Weighting", hole=0.4, title="Optimal Capital Allocation"), width='stretch')
+            else: st.warning("Add Custom Peers to run Portfolio Optimization.")
+            
+        with tab_bs:
+            st.subheader("Black-Scholes Options Pricing Model")
+            st.markdown("Calculates the theoretical fair-market value of European Call and Put options using advanced stochastic calculus.")
+            
+            # The Inputs
+            st.markdown("#### Option Contract Parameters")
+            bs_col1, bs_col2, bs_col3, bs_col4 = st.columns(4)
+            # Default strike price is slightly "Out of the Money" (5% above current price)
+            K = bs_col1.number_input("Strike Price (K)", value=float(current_price * 1.05), step=1.0)
+            T = bs_col2.slider("Time to Expiry (Years)", 0.1, 5.0, 1.0, 0.1)
+            r = bs_col3.slider("Risk-Free Rate (%)", 1.0, 10.0, 4.0, 0.1) / 100
+            sigma = bs_col4.slider("Implied Volatility (%)", 5.0, 100.0, 25.0, 1.0) / 100
+            
+            # The Mathematics
+            d1 = (np.log(current_price / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+            d2 = d1 - sigma * np.sqrt(T)
+            
+            call_price = current_price * si.norm.cdf(d1, 0.0, 1.0) - K * np.exp(-r * T) * si.norm.cdf(d2, 0.0, 1.0)
+            put_price = K * np.exp(-r * T) * si.norm.cdf(-d2, 0.0, 1.0) - current_price * si.norm.cdf(-d1, 0.0, 1.0)
+            
+            st.markdown("---")
+            st.markdown(f"#### Theoretical Premium Valuation for {selected_ticker}")
+            call_col, put_col = st.columns(2)
+            call_col.metric(label="Call Option Value (Right to Buy)", value=f"{curr_sym}{call_price:.2f}")
+            put_col.metric(label="Put Option Value (Right to Sell)", value=f"{curr_sym}{put_price:.2f}")
+            
+            # Visualizing the Option Curve
+            st.markdown("##### Pricing Sensitivity Curve (Option Value vs. Underlying Price)")
+            sim_prices = np.linspace(current_price * 0.5, current_price * 1.5, 100)
+            sim_d1 = (np.log(sim_prices / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+            sim_d2 = sim_d1 - sigma * np.sqrt(T)
+            sim_calls = sim_prices * si.norm.cdf(sim_d1, 0.0, 1.0) - K * np.exp(-r * T) * si.norm.cdf(sim_d2, 0.0, 1.0)
+            sim_puts = K * np.exp(-r * T) * si.norm.cdf(-sim_d2, 0.0, 1.0) - sim_prices * si.norm.cdf(-sim_d1, 0.0, 1.0)
+            
+            bs_df = pd.DataFrame({"Underlying Asset Price": sim_prices, "Call Value": sim_calls, "Put Value": sim_puts})
+            fig_bs = px.line(bs_df, x="Underlying Asset Price", y=["Call Value", "Put Value"], title="Theoretical Option Premium vs. Asset Price", color_discrete_sequence=['#10b981', '#ef4444'])
+            fig_bs.add_vline(x=current_price, line_dash="dash", line_color="gray", annotation_text="Current Market Price")
+            fig_bs.add_vline(x=K, line_dash="dash", line_color="white", annotation_text="Strike Price (K)")
+            fig_bs.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', yaxis_title="Option Premium Value")
+            st.plotly_chart(fig_bs, width='stretch')
+            
     else:
         st.error("🚨 Market entity not found or data retrieval failed.")

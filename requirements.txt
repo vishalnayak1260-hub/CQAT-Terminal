@@ -5,3 +5,5 @@ plotly
 SQLAlchemy
 yfinance
 requests
+fpdf
+scipy
