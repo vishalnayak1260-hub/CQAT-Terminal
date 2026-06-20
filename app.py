@@ -209,9 +209,17 @@ if st.session_state.app_running and selected_ticker:
 
         current_price = df_market['close_price'].iloc[-1] if not df_market.empty else info.get('currentPrice', 1.0)
         
-        raw_rev, raw_fcf = deep_metrics.get('revenue', 1000000000), deep_metrics.get('fcf')
-        fcf_base = float(raw_fcf / 1000000) if raw_fcf else (raw_rev * 0.12) / 1000000
-        shares = float(info.get('sharesOutstanding', 100000000) / 1000000)
+        # 1. Bulletproof Revenue Fallback
+        raw_rev = deep_metrics.get('revenue')
+        raw_rev = raw_rev if raw_rev is not None else 1000000000
+        
+        # 2. Bulletproof Free Cash Flow Fallback
+        raw_fcf = deep_metrics.get('fcf')
+        fcf_base = float(raw_fcf / 1000000) if raw_fcf is not None else (raw_rev * 0.12) / 1000000
+        
+        # 3. Bulletproof Shares Outstanding Fallback
+        shares_raw = info.get('sharesOutstanding')
+        shares = float(shares_raw / 1000000) if shares_raw is not None else 100.0
         
         pdf_dcf = {}
         for n, g in {"Bear Case": 0.04, "Base Case": 0.08, "Bull Case": 0.14}.items():
