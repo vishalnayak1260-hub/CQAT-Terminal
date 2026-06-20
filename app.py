@@ -9,20 +9,7 @@ import requests
 from database_core import Base, Company, MarketData
 
 # ==========================================
-# 1. NETWORKING & FIREWALL BYPASS CONFIG
-# ==========================================
-# This creates a spoofed browser session so Render looks like a home laptop to Yahoo
-custom_session = requests.Session()
-custom_session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Origin': 'https://finance.yahoo.com',
-    'Referer': 'https://finance.yahoo.com/'
-})
-
-# ==========================================
-# 2. PAGE CONFIGURATION & STYLING
+# 1. PAGE CONFIGURATION & STYLING
 # ==========================================
 st.set_page_config(page_title="Junior Analyst Terminal", page_icon="💼", layout="wide")
 
@@ -41,48 +28,107 @@ st.markdown("Enterprise Multi-Strategy Valuation & Financial Intelligence Worksp
 st.markdown("---")
 
 # ==========================================
-# 3. DATA PROCESSING & INGESTION ENGINE
+# 2. DATA PROCESSING & INGESTION ENGINE
 # ==========================================
 engine = create_engine('sqlite:///cqat_vault.db')
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-def resolve_company_name(query):
+@st.cache_data(ttl=300, show_spinner=False)
+def get_search_candidates(query):
+    """Hits the global API to return a list of matching companies with their context."""
     clean_query = query.strip()
-    if not clean_query:
-        return ""
+    if not clean_query: return []
+    
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_query}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
+    candidates = []
     try:
-        # Use the spoofed session and set a strict 5-second timeout
-        response = custom_session.get(url, timeout=5)
+        response = requests.get(url, headers=headers, timeout=5)
         data = response.json()
-        if 'quotes' in data and len(data['quotes']) > 0:
+        if 'quotes' in data:
             for quote in data['quotes']:
-                if quote.get('quoteType') == 'EQUITY':
-                    return quote.get('symbol')
-            return data['quotes'][0].get('symbol')
+                # Filter to only show actual equities/stocks (no mutual funds or options)
+                if quote.get('quoteType') in ['EQUITY', 'ETF']:
+                    name = quote.get('shortname', quote.get('longname', 'Unknown Name'))
+                    symbol = quote.get('symbol', '')
+                    exch = quote.get('exchange', 'Unknown Exchange')
+                    type_str = quote.get('quoteType', 'Asset')
+                    
+                    display_string = f"{name} ({symbol}) - {exch}"
+                    candidates.append({"display": display_string, "symbol": symbol})
     except Exception:
         pass
-    return clean_query.upper()
+        
+    # Failsafe if the API is blocked: Provide manual string guesses
+    if not candidates:
+        raw = clean_query.upper().replace(" ", "")
+        candidates.append({"display": f"Exact Ticker Match: {raw}", "symbol": raw})
+        if "." not in raw:
+            candidates.append({"display": f"Indian Market Guess: {raw}.NS", "symbol": f"{raw}.NS"})
+            candidates.append({"display": f"Bombay Market Guess: {raw}.BO", "symbol": f"{raw}.BO"})
+            
+    return candidates
+
+def fetch_and_store_financials(ticker_symbol):
+    session = Session()
+    exists = session.query(Company).filter_by(ticker=ticker_symbol).first()
+    if exists:
+        session.close()
+        return True
+        
+    try:
+        df = yf.download(ticker_symbol, period="1y", progress=False)
+        if df.empty:
+            session.close()
+            return False
+            
+        stock_info = yf.Ticker(ticker_symbol)
+        company_name = stock_info.info.get('shortName', ticker_symbol)
+        sector = stock_info.info.get('sector', 'General')
+        industry = stock_info.info.get('industry', 'General')
+        
+        new_company = Company(ticker=ticker_symbol, company_name=company_name, sector=sector, industry=industry)
+        session.add(new_company)
+        
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df['SMA_50'] = df['Close'].rolling(window=50).mean()
+        df['SMA_200'] = df['Close'].rolling(window=200).mean()
+        df = df.dropna()
+        
+        session.query(MarketData).filter_by(ticker=ticker_symbol).delete()
+        records = [
+            MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), 
+                       volume=int(row['Volume']), sma_50=float(row['SMA_50']), sma_200=float(row['SMA_200']))
+            for index, row in df.iterrows()
+        ]
+        session.bulk_save_objects(records)
+        session.commit()
+        session.close()
+        return True
+    except Exception:
+        session.rollback()
+        session.close()
+        return False
 
 def extract_financial_statements(raw_ticker, info):
     metrics = {
-        'revenue': info.get('totalRevenue'),
-        'net_income': info.get('netIncomeToCommon'),
-        'total_assets': info.get('totalAssets'),
-        'total_equity': info.get('totalStockholderEquity'),
+        'revenue': info.get('totalRevenue'), 'net_income': info.get('netIncomeToCommon'),
+        'total_assets': info.get('totalAssets'), 'total_equity': info.get('totalStockholderEquity'),
         'fcf': info.get('freeCashflow')
     }
     try:
         inc = raw_ticker.financials
         bs = raw_ticker.balance_sheet
         cf = raw_ticker.cashflow
-        
         if not inc.empty and metrics['revenue'] is None:
             for key in ['Total Revenue', 'Operating Revenue', 'Revenue']:
                 if key in inc.index: metrics['revenue'] = inc.loc[key].iloc[0]; break
         if not inc.empty and metrics['net_income'] is None:
-            for key in ['Net Income', 'Net Income Common Stockholders', 'Net Income From Continuing And Discontinued Operation']:
+            for key in ['Net Income', 'Net Income Common Stockholders']:
                 if key in inc.index: metrics['net_income'] = inc.loc[key].iloc[0]; break
         if not bs.empty and metrics['total_assets'] is None:
             if 'Total Assets' in bs.index: metrics['total_assets'] = bs.loc['Total Assets'].iloc[0]
@@ -95,73 +141,46 @@ def extract_financial_statements(raw_ticker, info):
         pass
     return metrics
 
-def fetch_and_store_financials(ticker_symbol):
-    session = Session()
-    exists = session.query(Company).filter_by(ticker=ticker_symbol).first()
-    if exists:
-        session.close()
-        return True
-        
-    try:
-        # Pass the custom browser session to yfinance
-        stock_info = yf.Ticker(ticker_symbol, session=custom_session)
-        company_name = stock_info.info.get('shortName', ticker_symbol)
-        sector = stock_info.info.get('sector', 'General')
-        industry = stock_info.info.get('industry', 'General')
-        
-        new_company = Company(ticker=ticker_symbol, company_name=company_name, sector=sector, industry=industry)
-        session.add(new_company)
-        
-        # Enforce session and a strict timeout on data download
-        df = yf.download(ticker_symbol, period="1y", progress=False, session=custom_session, timeout=5)
-        
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df['SMA_50'] = df['Close'].rolling(window=50).mean()
-            df['SMA_200'] = df['Close'].rolling(window=200).mean()
-            df = df.dropna()
-            
-            records = [
-                MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), 
-                           volume=int(row['Volume']), sma_50=float(row['SMA_50']), sma_200=float(row['SMA_200']))
-                for index, row in df.iterrows()
-            ]
-            session.bulk_save_objects(records)
-            
-        session.commit()
-        session.close()
-        return True
-    except Exception:
-        session.rollback()
-        session.close()
-        return False
-
 # ==========================================
-# 4. INTERFACE COMMAND SIDEBAR
+# 3. INTERFACE COMMAND SIDEBAR (UPDATED UI)
 # ==========================================
 st.sidebar.header("Command Center")
-raw_input = st.sidebar.text_input("Target Asset Name / Ticker:", "Microsoft")
-search_button = st.sidebar.button("Run Financial Intelligence Suite")
+
+# Step 1: User types the keyword
+raw_input = st.sidebar.text_input("1. Search Keyword or Brand:", "Tata")
+
+# Step 2: Dynamically fetch candidates and create a dropdown
+selected_ticker = None
+if raw_input:
+    candidates = get_search_candidates(raw_input)
+    if candidates:
+        # Create a dictionary mapping the visual text to the backend symbol
+        options_dict = {c["display"]: c["symbol"] for c in candidates}
+        # Show the dropdown
+        selection = st.sidebar.selectbox("2. Select Exact Market Asset:", list(options_dict.keys()))
+        selected_ticker = options_dict[selection]
+    else:
+        st.sidebar.warning("No public market matches found for that keyword.")
+
+# Step 3: The execution button
+search_button = st.sidebar.button("3. Run Financial Intelligence Suite")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📐 Custom Peer Comps")
-peer_input = st.sidebar.text_input("Peer Tickers / Names:", "Apple, Google, Amazon")
+peer_input = st.sidebar.text_input("Peer Tickers / Names:", "Mahindra, Reliance, Infosys")
 
 # ==========================================
-# 5. EXECUTION MATRIX
+# 4. EXECUTION MATRIX
 # ==========================================
-if search_button or raw_input:
-    selected_ticker = resolve_company_name(raw_input)
-    
-    with st.spinner(f"Connecting to data matrix for {selected_ticker}..."):
+if search_button and selected_ticker:
+    with st.spinner(f"Intercepting live data for {selected_ticker}..."):
         is_success = fetch_and_store_financials(selected_ticker)
     
     if is_success:
         df_market = pd.read_sql(f"SELECT * FROM fact_market WHERE ticker = '{selected_ticker}'", engine)
         
         try:
-            raw_ticker = yf.Ticker(selected_ticker, session=custom_session)
+            raw_ticker = yf.Ticker(selected_ticker)
             info = raw_ticker.info
             full_name = info.get('longName', info.get('shortName', selected_ticker))
             currency = info.get('currency', 'USD')
@@ -203,8 +222,6 @@ if search_button or raw_input:
                                     color_discrete_sequence=['#3b82f6', '#ef4444', '#10b981'])
                 fig_price.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', xaxis_title="Date", yaxis_title=f"Price ({currency})")
                 st.plotly_chart(fig_price, width='stretch')
-            else:
-                st.warning("⚠️ API Notice: Historical price charts are temporarily unavailable on this cloud node. Fundamental matrix tools below remain fully active.")
                 
             st.subheader("Valuation Summary Multiples")
             f_col1, f_col2, f_col3, f_col4 = st.columns(4)
@@ -217,26 +234,31 @@ if search_button or raw_input:
             st.subheader("Relative Valuation Matrix (Peer Comps)")
             raw_peer_strings = [p.strip() for p in peer_input.split(",") if p.strip()]
             resolved_peers = []
-            for raw_p in raw_peer_strings:
-                ticker_resolved = resolve_company_name(raw_p)
-                if ticker_resolved and ticker_resolved not in resolved_peers:
-                    resolved_peers.append(ticker_resolved)
+            
+            with st.spinner("Resolving exact peer identities..."):
+                for raw_p in raw_peer_strings:
+                    p_cands = get_search_candidates(raw_p)
+                    if p_cands:
+                        best_match = p_cands[0]['symbol']
+                        if best_match not in resolved_peers and best_match != selected_ticker:
+                            resolved_peers.append(best_match)
             
             all_tickers_to_compare = [selected_ticker] + resolved_peers
             st.caption(f"Active Peer Tracking Array: {', '.join(all_tickers_to_compare)}")
             
             comps_data = []
-            for t in all_tickers_to_compare:
-                try:
-                    p_ticker = yf.Ticker(t, session=custom_session)
-                    p_info = p_ticker.info
-                    comps_data.append({
-                        "Ticker": t, "Company Name": p_info.get('shortName', t),
-                        "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None),
-                        "P/B Ratio": p_info.get('priceToBook', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None
-                    })
-                except:
-                    pass
+            with st.spinner("Extracting operational metrics across peer group..."):
+                for t in all_tickers_to_compare:
+                    try:
+                        p_ticker = yf.Ticker(t)
+                        p_info = p_ticker.info
+                        comps_data.append({
+                            "Ticker": t, "Company Name": p_info.get('shortName', t),
+                            "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None),
+                            "P/B Ratio": p_info.get('priceToBook', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None
+                        })
+                    except:
+                        pass
             if comps_data:
                 df_comps = pd.DataFrame(comps_data)
                 st.dataframe(df_comps.style.highlight_max(axis=0, subset=['Net Margin (%)']).format({
@@ -278,7 +300,7 @@ if search_button or raw_input:
             dcf_metrics_cols = st.columns(3)
             idx = 0
             for name, val in dcf_results.items():
-                upside = ((val - c_price) / c_price) * 100
+                upside = ((val - c_price) / c_price) * 100 if c_price > 0 else 0
                 dcf_metrics_cols[idx].metric(name, f"{curr_sym}{val:.2f}", f"{upside:+.1f}% Implied Edge")
                 idx += 1
 
@@ -299,6 +321,6 @@ if search_button or raw_input:
                 if equity_multiplier > 2.5: st.warning("⚠️ Risk Warning: High Equity Multiplier implies heavy leverage.")
                 else: st.success("✅ Operational Health: Corporate leverage is balanced.")
             else:
-                st.warning("Financial disclosure data throttled on this cloud server node.")
+                st.warning("Accounting data for a full DuPont breakdown is missing for this ticker.")
     else:
-        st.error("🚨 Cloud Firewall Block: Yahoo Finance rejected or timed out the connection to the hosting server. Consider executing via local runtime environment.")
+        st.error("🚨 Market entity not found or data retrieval failed. The asset may be delisted or untrackable by the current data provider.")
