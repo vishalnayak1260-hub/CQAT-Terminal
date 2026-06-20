@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import yfinance as yf
@@ -18,7 +19,7 @@ st.markdown("""
     .main {background-color: #0e1117;}
     h1, h2, h3 {color: #e2e8f0;}
     .stMetric {background-color: #1e293b; padding: 15px; border-radius: 10px; border: 1px solid #334155;}
-    .stTabs [data-baseweb="tab"] {font-size: 16px; font-weight: 600; color: #94a3b8;}
+    .stTabs [data-baseweb="tab"] {font-size: 14px; font-weight: 600; color: #94a3b8;}
     .stTabs [data-baseweb="tab"][aria-selected="true"] {color: #3b82f6; border-bottom-color: #3b82f6;}
     </style>
 """, unsafe_allow_html=True)
@@ -36,39 +37,30 @@ Session = sessionmaker(bind=engine)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_search_candidates(query):
-    """Hits the global API to return a list of matching companies with their context."""
     clean_query = query.strip()
     if not clean_query: return []
-    
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_query}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    
     candidates = []
     try:
         response = requests.get(url, headers=headers, timeout=5)
         data = response.json()
         if 'quotes' in data:
             for quote in data['quotes']:
-                # Filter to only show actual equities/stocks (no mutual funds or options)
                 if quote.get('quoteType') in ['EQUITY', 'ETF']:
                     name = quote.get('shortname', quote.get('longname', 'Unknown Name'))
                     symbol = quote.get('symbol', '')
                     exch = quote.get('exchange', 'Unknown Exchange')
-                    type_str = quote.get('quoteType', 'Asset')
-                    
                     display_string = f"{name} ({symbol}) - {exch}"
                     candidates.append({"display": display_string, "symbol": symbol})
     except Exception:
         pass
-        
-    # Failsafe if the API is blocked: Provide manual string guesses
     if not candidates:
         raw = clean_query.upper().replace(" ", "")
         candidates.append({"display": f"Exact Ticker Match: {raw}", "symbol": raw})
         if "." not in raw:
             candidates.append({"display": f"Indian Market Guess: {raw}.NS", "symbol": f"{raw}.NS"})
             candidates.append({"display": f"Bombay Market Guess: {raw}.BO", "symbol": f"{raw}.BO"})
-            
     return candidates
 
 def fetch_and_store_financials(ticker_symbol):
@@ -77,28 +69,22 @@ def fetch_and_store_financials(ticker_symbol):
     if exists:
         session.close()
         return True
-        
     try:
         df = yf.download(ticker_symbol, period="1y", progress=False)
         if df.empty:
             session.close()
             return False
-            
         stock_info = yf.Ticker(ticker_symbol)
         company_name = stock_info.info.get('shortName', ticker_symbol)
         sector = stock_info.info.get('sector', 'General')
         industry = stock_info.info.get('industry', 'General')
-        
         new_company = Company(ticker=ticker_symbol, company_name=company_name, sector=sector, industry=industry)
         session.add(new_company)
-        
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-            
         df['SMA_50'] = df['Close'].rolling(window=50).mean()
         df['SMA_200'] = df['Close'].rolling(window=200).mean()
         df = df.dropna()
-        
         session.query(MarketData).filter_by(ticker=ticker_symbol).delete()
         records = [
             MarketData(ticker=ticker_symbol, date=index.date(), close_price=float(row['Close']), 
@@ -142,27 +128,21 @@ def extract_financial_statements(raw_ticker, info):
     return metrics
 
 # ==========================================
-# 3. INTERFACE COMMAND SIDEBAR (UPDATED UI)
+# 3. INTERFACE COMMAND SIDEBAR
 # ==========================================
 st.sidebar.header("Command Center")
 
-# Step 1: User types the keyword
 raw_input = st.sidebar.text_input("1. Search Keyword or Brand:", "Tata")
-
-# Step 2: Dynamically fetch candidates and create a dropdown
 selected_ticker = None
 if raw_input:
     candidates = get_search_candidates(raw_input)
     if candidates:
-        # Create a dictionary mapping the visual text to the backend symbol
         options_dict = {c["display"]: c["symbol"] for c in candidates}
-        # Show the dropdown
         selection = st.sidebar.selectbox("2. Select Exact Market Asset:", list(options_dict.keys()))
         selected_ticker = options_dict[selection]
     else:
         st.sidebar.warning("No public market matches found for that keyword.")
 
-# Step 3: The execution button
 search_button = st.sidebar.button("3. Run Financial Intelligence Suite")
 
 st.sidebar.markdown("---")
@@ -196,11 +176,12 @@ if search_button and selected_ticker:
         st.header(f"{full_name} ({selected_ticker})")
         st.markdown(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')} | **Exchange:** {info.get('exchange', 'N/A')}")
         
-        tab_market, tab_comps, tab_dcf, tab_dupont = st.tabs([
-            "📈 Market Performance & Multiples", 
-            "📊 Comparable Peer Benchmarking", 
-            "🔮 Intrinsic 3-Scenario DCF Model",
-            "🔍 DuPont Profitability Analysis"
+        tab_market, tab_comps, tab_dcf, tab_dupont, tab_mpt = st.tabs([
+            "📈 Market Performance", 
+            "📊 Peer Benchmarking", 
+            "🔮 DCF Valuation",
+            "🔍 DuPont Analysis",
+            "⚖️ Quant Portfolio Optimizer"
         ])
         
         with tab_market:
@@ -322,5 +303,68 @@ if search_button and selected_ticker:
                 else: st.success("✅ Operational Health: Corporate leverage is balanced.")
             else:
                 st.warning("Accounting data for a full DuPont breakdown is missing for this ticker.")
+                
+        with tab_mpt:
+            st.subheader("Modern Portfolio Theory (MPT) Optimization")
+            st.markdown("Uses a Monte Carlo simulation (5,000 iterations) across the target asset and peer group to find the Mathematically Optimal Portfolio Weighting (Maximum Sharpe Ratio).")
+            
+            if len(all_tickers_to_compare) >= 2:
+                with st.spinner("Downloading historical arrays and running Monte Carlo simulation..."):
+                    # 1. Download 2 years of data for all tickers
+                    mpt_data = yf.download(all_tickers_to_compare, period="2y", progress=False)['Close']
+                    
+                    if not mpt_data.empty:
+                        # 2. Calculate Daily Returns and Annualize
+                        daily_returns = mpt_data.pct_change().dropna()
+                        annual_returns = daily_returns.mean() * 252
+                        cov_matrix = daily_returns.cov() * 252
+                        
+                        num_portfolios = 5000
+                        results = np.zeros((3, num_portfolios))
+                        weights_record = []
+                        
+                        # 3. Simulate 5,000 random weight combinations
+                        for i in range(num_portfolios):
+                            weights = np.random.random(len(all_tickers_to_compare))
+                            weights /= np.sum(weights)
+                            weights_record.append(weights)
+                            
+                            portfolio_return = np.sum(annual_returns * weights)
+                            portfolio_std_dev = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+                            
+                            results[0,i] = portfolio_return
+                            results[1,i] = portfolio_std_dev
+                            results[2,i] = (portfolio_return - 0.04) / portfolio_std_dev # Assuming 4% Risk-Free Rate
+                            
+                        # 4. Find the portfolio with the highest Sharpe Ratio
+                        max_sharpe_idx = np.argmax(results[2])
+                        opt_return = results[0, max_sharpe_idx]
+                        opt_std = results[1, max_sharpe_idx]
+                        opt_sharpe = results[2, max_sharpe_idx]
+                        opt_weights = weights_record[max_sharpe_idx]
+                        
+                        mpt_col1, mpt_col2, mpt_col3 = st.columns(3)
+                        mpt_col1.metric("Expected Annual Return", f"{opt_return * 100:.2f}%")
+                        mpt_col2.metric("Expected Annual Risk (Volatility)", f"{opt_std * 100:.2f}%")
+                        mpt_col3.metric("Maximum Sharpe Ratio", f"{opt_sharpe:.2f}")
+                        
+                        # Plot the Efficient Frontier
+                        fig_mpt = px.scatter(
+                            x=results[1,:], y=results[0,:], color=results[2,:],
+                            labels={'x': 'Risk (Annualized Volatility)', 'y': 'Return (Annualized)', 'color': 'Sharpe Ratio'},
+                            title="The Efficient Frontier (5,000 Simulated Portfolios)",
+                            color_continuous_scale="Viridis"
+                        )
+                        # Add a star for the optimal portfolio
+                        fig_mpt.add_trace(go.Scatter(x=[opt_std], y=[opt_return], mode='markers', marker=dict(color='red', size=15, symbol='star'), name='Optimal Portfolio'))
+                        fig_mpt.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                        st.plotly_chart(fig_mpt, width='stretch')
+                        
+                        st.markdown("**Optimal Capital Allocation Weights:**")
+                        weight_df = pd.DataFrame({"Asset": all_tickers_to_compare, "Weighting": opt_weights})
+                        fig_weights = px.pie(weight_df, names="Asset", values="Weighting", hole=0.4, title="Mathematically Optimal Portfolio Distribution")
+                        st.plotly_chart(fig_weights, width='stretch')
+            else:
+                st.warning("Please enter at least one Custom Peer to run the Portfolio Optimization engine.")
     else:
-        st.error("🚨 Market entity not found or data retrieval failed. The asset may be delisted or untrackable by the current data provider.")
+        st.error("🚨 Market entity not found or data retrieval failed.")
