@@ -2,7 +2,6 @@ streamlit
 pandas
 numpy
 plotly
-SQLAlchemy
 yfinance
 requests
 fpdf

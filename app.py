@@ -3,13 +3,11 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 import yfinance as yf
 import requests
 from fpdf import FPDF
 import scipy.stats as si
-from database_core import Base, Company, MarketData
+import scipy.optimize as sco
 
 # ==========================================
 # 1. PAGE CONFIGURATION & CUSTOM CSS
@@ -28,12 +26,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA PROCESSING ENGINE (LIVE MEMORY BYPASS)
+# 2. CACHED DATA PIPELINES (RAM ENGINE)
 # ==========================================
-engine = create_engine('sqlite:///cqat_vault.db')
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
-
 def resolve_automatic_peer(ticker, sector="", industry=""):
     tk = ticker.upper().strip()
     pairs_map = {
@@ -77,20 +71,13 @@ def get_search_candidates(query):
             candidates.append({"display": f"Indian Market Guess: {raw}.NS", "symbol": f"{raw}.NS"})
     return candidates
 
-def fetch_and_store_financials(ticker_symbol, time_horizon="1y"):
-    """Fetches data, formats it into a Live Memory DataFrame, and silently updates the DB."""
-    session = Session()
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_financials(ticker_symbol, time_horizon="1y"):
+    """Fetches core price data and caches it instantly to memory."""
     try:
         df = yf.download(ticker_symbol, period=time_horizon, progress=False)
-        if df.empty:
-            session.close()
-            return False, None
-            
-        stock_info = yf.Ticker(ticker_symbol)
-        if not session.query(Company).filter_by(ticker=ticker_symbol).first():
-            new_company = Company(ticker=ticker_symbol, company_name=stock_info.info.get('shortName', ticker_symbol), sector=stock_info.info.get('sector', 'General'), industry=stock_info.info.get('industry', 'General'))
-            session.add(new_company)
-            
+        if df.empty: return False, None
+        
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
@@ -99,8 +86,6 @@ def fetch_and_store_financials(ticker_symbol, time_horizon="1y"):
         df = df.dropna().reset_index()
         
         date_col = 'Date' if 'Date' in df.columns else 'Datetime'
-        
-        # LIVE MEMORY DATAFRAME - completely bypasses SQLite caching bugs
         df_market = pd.DataFrame({
             'date': pd.to_datetime(df[date_col]).dt.tz_localize(None),
             'close_price': df['Close'].astype(float),
@@ -108,26 +93,44 @@ def fetch_and_store_financials(ticker_symbol, time_horizon="1y"):
             'sma_50': df['SMA_50'].astype(float),
             'sma_200': df['SMA_200'].astype(float)
         })
-        
-        # Silent DB Save
-        session.query(MarketData).filter_by(ticker=ticker_symbol).delete()
-        records = [MarketData(ticker=ticker_symbol, date=row['date'].date(), close_price=row['close_price'], volume=row['volume'], sma_50=row['sma_50'], sma_200=row['sma_200']) for _, row in df_market.iterrows()]
-        session.bulk_save_objects(records)
-        session.commit()
-        session.close()
-        
         return True, df_market
-    except Exception as e:
-        session.rollback()
-        session.close()
+    except Exception:
         return False, None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_peer_comps(tickers_tuple):
+    """Caches the heavy fundamental peer pull so UI slider changes don't crash the app."""
+    comps_data = []
+    for t in tickers_tuple:
+        try:
+            p_info = yf.Ticker(t).info
+            comps_data.append({"Ticker": t, "Company Name": p_info.get('shortName', t), "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None})
+        except: pass
+    return comps_data
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_macro_data(time_horizon):
+    """Caches global macro yields to prevent redundant API calls."""
+    try:
+        return yf.download(['^TNX', '^IRX', '^VIX'], period=time_horizon, progress=False)['Close']
+    except:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_mpt_data(tickers_tuple, time_horizon):
+    """Caches Monte Carlo target data for the portfolio optimizer."""
+    try:
+        return yf.download(list(tickers_tuple), period=time_horizon, progress=False)['Close']
+    except:
+        return pd.DataFrame()
 
 def extract_financial_statements(raw_ticker, info):
     metrics = {
         'revenue': info.get('totalRevenue'), 'net_income': info.get('netIncomeToCommon'), 
         'total_assets': info.get('totalAssets'), 'total_equity': info.get('totalStockholderEquity'), 
         'fcf': info.get('freeCashflow'), 'total_liabilities': info.get('totalLiabilitiesNetMinorityInterest'),
-        'ebit': info.get('ebitda'), 'operating_cashflow': info.get('operatingCashflow')
+        'ebit': info.get('ebitda'), 'operating_cashflow': info.get('operatingCashflow'),
+        'current_assets': None, 'current_liabilities': None
     }
     try:
         inc, bs, cf = raw_ticker.financials, raw_ticker.balance_sheet, raw_ticker.cashflow
@@ -146,6 +149,13 @@ def extract_financial_statements(raw_ticker, info):
             if 'Total Liabilities Net Minority Interest' in bs.index: metrics['total_liabilities'] = bs.loc['Total Liabilities Net Minority Interest'].iloc[0]
         if not cf.empty and metrics['fcf'] is None:
             if 'Free Cash Flow' in cf.index: metrics['fcf'] = cf.loc['Free Cash Flow'].iloc[0]
+        if not cf.empty and metrics['operating_cashflow'] is None:
+            if 'Operating Cash Flow' in cf.index: metrics['operating_cashflow'] = cf.loc['Operating Cash Flow'].iloc[0]
+            
+        if not bs.empty and metrics['current_assets'] is None:
+            if 'Total Current Assets' in bs.index: metrics['current_assets'] = bs.loc['Total Current Assets'].iloc[0]
+        if not bs.empty and metrics['current_liabilities'] is None:
+            if 'Total Current Liabilities' in bs.index: metrics['current_liabilities'] = bs.loc['Total Current Liabilities'].iloc[0]
     except Exception: pass
     return metrics
 
@@ -198,7 +208,7 @@ st.sidebar.markdown("Modify core institutional variables below.")
 with st.sidebar.expander("🌍 Macro & Horizon Inputs", expanded=True):
     time_horizon = st.selectbox("Analysis Time Horizon:", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=3)
     benchmark_input = st.text_input("Macro Benchmark Overlay:", "^GSPC", help="Used to map relative momentum.")
-    global_rf = st.number_input("Global Risk-Free Rate (%)", value=4.5, step=0.1) / 100
+    global_rf = st.number_input("US Risk-Free Rate (%)", value=4.5, step=0.1) / 100
     global_erp = st.number_input("Equity Risk Premium (%)", value=5.5, step=0.1) / 100
 
 with st.sidebar.expander("⚖️ Portfolio Targets", expanded=True):
@@ -240,7 +250,7 @@ if search_button and selected_ticker: st.session_state.app_running = True
 if st.session_state.app_running and selected_ticker:
     st.divider()
     with st.spinner(f"Connecting to Exchange and running Quantitative Engines for {selected_ticker}..."):
-        is_success, df_market = fetch_and_store_financials(selected_ticker, time_horizon)
+        is_success, df_market = fetch_financials(selected_ticker, time_horizon)
     
     if is_success and df_market is not None:
         try:
@@ -251,7 +261,7 @@ if st.session_state.app_running and selected_ticker:
             deep_metrics = extract_financial_statements(raw_ticker, info)
         except:
             info, full_name, currency, curr_sym = {}, selected_ticker, "USD", "$"
-            deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None, 'total_liabilities': None, 'ebit': None, 'operating_cashflow': None}
+            deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None, 'total_liabilities': None, 'ebit': None, 'operating_cashflow': None, 'current_assets': None, 'current_liabilities': None}
 
         current_price = df_market['close_price'].iloc[-1] if not df_market.empty else info.get('currentPrice', 1.0)
         beta_raw = info.get('beta', 1.0)
@@ -266,7 +276,23 @@ if st.session_state.app_running and selected_ticker:
         dividend_yield = info.get('dividendYield', 0)
         dividend_rate = info.get('dividendRate', 0)
         
-        calculated_wacc = global_rf + (beta_raw * global_erp)
+        is_indian = selected_ticker.endswith('.NS') or selected_ticker.endswith('.BO')
+        current_rf = 0.068 if is_indian else global_rf
+        
+        cost_of_equity = current_rf + (beta_raw * global_erp)
+        
+        total_debt = info.get('totalDebt', 0)
+        market_cap = info.get('marketCap', 0)
+        tax_rate_proxy = 0.25 
+        
+        if total_debt and market_cap and total_debt > 0:
+            total_capital = total_debt + market_cap
+            weight_equity = market_cap / total_capital
+            weight_debt = total_debt / total_capital
+            cost_of_debt = current_rf + 0.02 # Corporate spread proxy
+            calculated_wacc = (weight_equity * cost_of_equity) + (weight_debt * cost_of_debt * (1 - tax_rate_proxy))
+        else:
+            calculated_wacc = cost_of_equity
         
         pdf_dcf = {}
         for n, g in {"Bear Case": 0.04, "Base Case": 0.08, "Bull Case": 0.14}.items():
@@ -279,7 +305,6 @@ if st.session_state.app_running and selected_ticker:
         if ni and ta and te and rev and ta > 0 and te > 0 and rev > 0:
             dupont_data = {'valid': True, 'npm': (ni/rev)*100, 'ato': rev/ta, 'em': ta/te, 'roe': (ni/rev)*(rev/ta)*(ta/te)*100}
 
-        # HEADER AND EXPORT STRIP
         col_head1, col_head2 = st.columns([3, 1])
         with col_head1:
             st.header(f"📊 {full_name} ({selected_ticker})")
@@ -289,11 +314,10 @@ if st.session_state.app_running and selected_ticker:
             pdf_bytes = generate_pdf_report(selected_ticker, full_name, info.get('sector', 'N/A'), curr_sym, current_price, info, pdf_dcf, dupont_data, graham_number)
             st.download_button("📥 PDF Tear Sheet", data=pdf_bytes, file_name=f"{selected_ticker}_Tear_Sheet.pdf", mime="application/pdf", use_container_width=True)
             csv_data = df_market.to_csv(index=False).encode('utf-8')
-            st.download_button(label="📥 Raw SQL Data (CSV)", data=csv_data, file_name=f"{selected_ticker}_historical.csv", mime='text/csv', use_container_width=True)
+            st.download_button(label="📥 Raw Data (CSV)", data=csv_data, file_name=f"{selected_ticker}_historical.csv", mime='text/csv', use_container_width=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # TERMINAL TABS
         tabs = st.tabs([
             "📈 Market", "📊 Comps", "💎 Value", "🔮 DCF", "🏛️ Health", "⚖️ Portfolio", 
             "🤖 Forecast", "🧮 Options", "📊 Algo", "📅 Season", "🛡️ VaR", "🎭 Arb", 
@@ -359,12 +383,9 @@ if st.session_state.app_running and selected_ticker:
                         resolved_peers.append(p_cands[0]['symbol'])
             all_tickers_to_compare = [selected_ticker] + resolved_peers
             
-            comps_data = []
-            for t in all_tickers_to_compare:
-                try:
-                    p_info = yf.Ticker(t).info
-                    comps_data.append({"Ticker": t, "Company Name": p_info.get('shortName', t), "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None})
-                except: pass
+            # Utilizing Phase 2 Caching Module
+            with st.spinner("Loading Peer Fundamentals from Cache..."):
+                comps_data = fetch_peer_comps(tuple(all_tickers_to_compare))
             
             if comps_data:
                 df_comps = pd.DataFrame(comps_data)
@@ -403,23 +424,28 @@ if st.session_state.app_running and selected_ticker:
             earnings_yield = (ebit / ev * 100) if ebit and ev and ev > 0 else 0
             st.metric("Acquirer's Multiple (Earnings Yield)", f"{earnings_yield:.2f}%", help="EBIT / Enterprise Value. Metric used by private equity to find cash-cow targets.")
             
-            st.markdown("#### Piotroski F-Score Proxy")
+            st.markdown("#### Piotroski F-Score (Proxy Metric)")
             f_score = 0
             if ni and ni > 0: f_score += 1
             if deep_metrics.get('operating_cashflow') and deep_metrics.get('operating_cashflow') > 0: f_score += 1
             if deep_metrics.get('operating_cashflow') and ni and deep_metrics.get('operating_cashflow') > ni: f_score += 1
             if info.get('returnOnAssets') and info.get('returnOnAssets') > 0: f_score += 1
-            st.progress(f_score / 9)
-            st.caption(f"Estimated Score: {f_score} / 9 (Based on available fundamental metrics)")
+            st.progress(f_score / 4)
+            st.caption(f"Estimated Score: {f_score} / 4 (Based on available yfinance API fundamentals: Net Income, OCF, OCF > NI, ROA. Excludes leverage and margin trends due to API limits.)")
 
         with tab_dcf:
             st.subheader("Parametric 3-Scenario DCF & CAPM Integration")
-            st.markdown("#### Capital Asset Pricing Model (Dynamic WACC)")
-            st.caption(f"Using Global Inputs: Risk-Free Rate ({global_rf*100}%) + Beta ({beta_raw}) * ERP ({global_erp*100}%) = **{calculated_wacc*100:.2f}%**")
+            st.markdown("#### Capital Asset Pricing Model & WACC")
+            st.caption(f"**Cost of Equity (Ke):** Risk-Free Rate ({current_rf*100:.2f}%) + Beta ({beta_raw}) * ERP ({global_erp*100:.2f}%) = **{cost_of_equity*100:.2f}%**")
+            if total_debt and total_debt > 0:
+                st.caption(f"**True WACC:** {calculated_wacc*100:.2f}% (Weighted Equity & Debt Structure)")
+            else:
+                st.caption(f"**True WACC:** {calculated_wacc*100:.2f}% (No debt detected, WACC defaults to Ke)")
             
             dcf_col1, dcf_col2, dcf_col3 = st.columns(3)
             ui_fcf = dcf_col1.number_input("Base FCF Override (Millions)", value=float(fcf_base), step=10.0)
-            ui_wacc = dcf_col2.slider("Discount Rate (WACC %)", 5.0, 20.0, float(calculated_wacc*100), 0.5) / 100
+            default_wacc_ui = min(max(float(calculated_wacc*100), 5.0), 30.0)
+            ui_wacc = dcf_col2.slider("Discount Rate (WACC %)", 5.0, 30.0, default_wacc_ui, 0.5) / 100
             ui_t_growth = dcf_col3.slider("Terminal Growth Rate (%)", 1.0, 8.0, 4.0, 0.5) / 100
             
             ui_dcf_results = {}
@@ -463,6 +489,7 @@ if st.session_state.app_running and selected_ticker:
             st.subheader("🏛️ Corporate Health & Forensics")
             
             st.markdown("#### Value Creation Engine (ROIC vs. Cost of Capital)")
+            st.caption("Note: Invested Capital is approximated as (Total Assets - 0.4 * Total Liabilities) due to transient API limitations on specific operating liabilities.")
             tax_rate_proxy = 0.21
             if ebit and ta:
                 nopat = ebit * (1 - tax_rate_proxy)
@@ -477,8 +504,16 @@ if st.session_state.app_running and selected_ticker:
 
             st.markdown("#### Altman Z-Score (Bankruptcy Probability Model)")
             tl, mkt_cap = deep_metrics.get('total_liabilities'), info.get('marketCap')
+            ca = deep_metrics.get('current_assets')
+            cl = deep_metrics.get('current_liabilities')
+            working_capital = (ca - cl) if ca and cl else 0
+            
             if ta and rev and tl and mkt_cap and ebit and ta > 0 and tl > 0:
-                x1, x2, x3, x4, x5 = (ta * 0.2) / ta, te / ta, ebit / ta, mkt_cap / tl, rev / ta
+                x1 = working_capital / ta # True liquidity ratio
+                x2 = te / ta
+                x3 = ebit / ta
+                x4 = mkt_cap / tl
+                x5 = rev / ta
                 z_score = (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (1.0 * x5)
                 z_col1, z_col2 = st.columns([1, 2])
                 z_col1.metric("Calculated Altman Z-Score", f"{z_score:.2f}")
@@ -498,8 +533,9 @@ if st.session_state.app_running and selected_ticker:
         with tab_mpt:
             st.subheader("Modern Portfolio Theory (MPT) Optimization")
             if len(all_tickers_to_compare) >= 2:
-                with st.spinner("Running Monte Carlo simulation..."):
-                    mpt_data = yf.download(all_tickers_to_compare, period=time_horizon, progress=False)['Close']
+                with st.spinner("Executing Constrained SLSQP Portfolio Optimization..."):
+                    # Phase 2 Caching Upgrades
+                    mpt_data = fetch_mpt_data(tuple(all_tickers_to_compare), time_horizon)
                     if not mpt_data.empty:
                         ret = mpt_data.pct_change().dropna()
                         
@@ -507,34 +543,37 @@ if st.session_state.app_running and selected_ticker:
                         fig_corr = px.imshow(ret.corr(), text_auto=".2f", color_continuous_scale="Blues", aspect="auto")
                         st.plotly_chart(fig_corr, use_container_width=True)
                         
-                        ann_ret, cov = ret.mean() * 252, ret.cov() * 252
-                        downside_std = ret[ret < 0].std() * np.sqrt(252)
-                        downside_var_matrix = np.diag(downside_std**2) if not downside_std.empty else np.diag(np.zeros(len(all_tickers_to_compare)))
+                        ann_ret = ret.mean() * 252
+                        cov = ret.cov() * 252
+                        num_assets = len(all_tickers_to_compare)
                         
-                        res, w_rec = np.zeros((4, 5000)), []
-                        for i in range(5000):
-                            w = np.random.random(len(all_tickers_to_compare)); w /= np.sum(w); w_rec.append(w)
-                            p_ret = np.sum(ann_ret * w); p_std = np.sqrt(np.dot(w.T, np.dot(cov, w)))
-                            p_down_std = np.sqrt(np.dot(w.T, np.dot(downside_var_matrix, w))) if not downside_std.empty else p_std
-                            res[0,i], res[1,i] = p_ret, p_std
-                            res[2,i] = (p_ret - global_rf) / p_std 
-                            res[3,i] = (p_ret - global_rf) / p_down_std if p_down_std > 0 else 0 
-                            
-                        m_idx = np.argmax(res[2]) 
+                        # TITAN UPGRADE: SCIPY.OPTIMIZE SLSQP Algorithm (Replaces random Monte Carlo)
+                        def calc_portfolio_perf(weights, ann_ret, cov, rf):
+                            p_ret = np.sum(ann_ret * weights)
+                            p_std = np.sqrt(np.dot(weights.T, np.dot(cov, weights)))
+                            sharpe = (p_ret - rf) / p_std if p_std > 0 else 0
+                            return p_ret, p_std, sharpe
+
+                        def neg_sharpe(weights, ann_ret, cov, rf):
+                            return -calc_portfolio_perf(weights, ann_ret, cov, rf)[2]
+
+                        args = (ann_ret, cov, current_rf)
+                        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1}) # Weights must equal 100%
+                        bounds = tuple((0.0, 1.0) for _ in range(num_assets)) # No short-selling constraint
+                        init_guess = num_assets * [1. / num_assets,]
+
+                        opt_results = sco.minimize(neg_sharpe, init_guess, args=args, method='SLSQP', bounds=bounds, constraints=constraints)
+                        
+                        opt_weights = opt_results.x
+                        opt_ret, opt_std, opt_sharpe = calc_portfolio_perf(opt_weights, ann_ret, cov, current_rf)
+                        
                         m1, m2, m3, m4 = st.columns(4)
-                        m1.metric("Expected Annual Return", f"{res[0, m_idx] * 100:.2f}%")
-                        m2.metric("Expected Annual Risk", f"{res[1, m_idx] * 100:.2f}%")
-                        m3.metric("Max Sharpe Ratio", f"{res[2, m_idx]:.2f}")
-                        m4.metric("Max Sortino Ratio", f"{res[3, m_idx]:.2f}")
+                        m1.metric("Maximized Expected Return", f"{opt_ret * 100:.2f}%")
+                        m2.metric("Optimized Portfolio Risk", f"{opt_std * 100:.2f}%")
+                        m3.metric("Maximum Sharpe Ratio", f"{opt_sharpe:.2f}")
+                        m4.metric("Algorithm Used", "Scipy SLSQP")
                         
-                        st.markdown("#### Monte Carlo Frontier Analysis")
-                        fig_mpt = px.scatter(x=res[1,:], y=res[0,:], color=res[2,:], labels={'x': 'Risk', 'y': 'Return', 'color': 'Sharpe'}, title="Efficient Frontier")
-                        fig_mpt.add_trace(go.Scatter(x=[res[1, m_idx]], y=[res[0, m_idx]], mode='markers', marker=dict(color='red', size=15, symbol='star'), name='Optimal'))
-                        fig_mpt.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                        st.plotly_chart(fig_mpt, use_container_width=True)
-                        
-                        st.markdown(f"#### Optimal Capital Deployment (Assuming {curr_sym}{portfolio_capital:,.2f})")
-                        opt_weights = w_rec[m_idx]
+                        st.markdown(f"#### Optimal Capital Deployment via SLSQP (Assuming {curr_sym}{portfolio_capital:,.2f})")
                         alloc_data = []
                         for idx, ticker in enumerate(all_tickers_to_compare):
                             alloc_data.append({"Asset": ticker, "Weight": opt_weights[idx], "Capital": opt_weights[idx] * portfolio_capital})
@@ -606,7 +645,7 @@ if st.session_state.app_running and selected_ticker:
             bs_col1, bs_col2, bs_col3, bs_col4 = st.columns(4)
             K = bs_col1.number_input("Strike Price (K)", value=float(current_price * 1.05), step=1.0)
             T = bs_col2.slider("Time to Expiry (Years)", 0.01, 5.0, 1.0, 0.05)
-            r = bs_col3.slider("Risk-Free Rate (%)", 1.0, 10.0, float(global_rf*100), 0.1) / 100
+            r = bs_col3.slider("Risk-Free Rate (%)", 1.0, 10.0, float(current_rf*100), 0.1) / 100
             sigma = bs_col4.slider("Implied Volatility (%)", 5.0, 150.0, 30.0, 1.0) / 100
             
             d1 = (np.log(current_price / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -825,7 +864,8 @@ if st.session_state.app_running and selected_ticker:
             st.subheader("🌐 Global Macroeconomic Regime")
             with st.spinner("Fetching Treasury Yields and Volatility Index..."):
                 try:
-                    yield_data = yf.download(['^TNX', '^IRX', '^VIX'], period=time_horizon, progress=False)['Close']
+                    # Phase 2 Caching Upgrades
+                    yield_data = fetch_macro_data(time_horizon)
                     if not yield_data.empty:
                         yield_data = yield_data.dropna()
                         yield_data['Yield_Spread'] = yield_data['^TNX'] - yield_data['^IRX']
