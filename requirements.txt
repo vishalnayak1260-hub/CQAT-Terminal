@@ -6,3 +6,4 @@ yfinance
 requests
 fpdf
 scipy
+google-genai

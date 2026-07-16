@@ -8,6 +8,7 @@ import requests
 from fpdf import FPDF
 import scipy.stats as si
 import scipy.optimize as sco
+from google import genai
 
 # ==========================================
 # 1. PAGE CONFIGURATION & CUSTOM CSS
@@ -201,6 +202,28 @@ def generate_pdf_report(ticker, full_name, sector, curr_sym, c_price, info, dcf_
     pdf.cell(0, 6, "Generated via Quantitative Asset Terminal. Not financial advice.", align='C')
     return pdf.output(dest='S').encode('latin-1')
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def generate_ai_thesis(ticker, full_name, metrics_summary):
+    try:
+        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+        prompt = f"""You are an expert equity research analyst. Based on the following quantitative metrics for {full_name} ({ticker}), write a concise investment thesis (~200 words).
+
+Structure your response exactly as follows:
+1. **Verdict**: (Buy / Hold / Sell lean)
+2. **Valuation Case**: (Brief analysis of the DCF, WACC, and Price)
+3. **Key Risk**: (Highlight the biggest vulnerability from the data, e.g., low Z-score, bad ROIC, or overbought RSI)
+4. **One-Line Rationale**: (A single punchy closing sentence)
+
+Metrics:
+{metrics_summary}"""
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",
+            contents=prompt
+        )
+        return response.text
+    except Exception as e:
+        return f"ERROR: {str(e)}"
+
 # ==========================================
 # 3. SIDEBAR: MACRO CONTROL DECK
 # ==========================================
@@ -336,9 +359,9 @@ if st.session_state.app_running and selected_ticker:
         tabs = st.tabs([
             "📈 Market", "📊 Comps", "💎 Value", "🔮 Valuation", "🏛️ Health", "⚖️ Portfolio", 
             "🤖 Forecast", "🧮 Options", "📊 Algo", "📅 Season", "🛡️ VaR", "🎭 Arb", 
-            "🕵️ Insiders", "🌐 Macro"
+            "🕵️ Insiders", "🌐 Macro", "🧠 AI Thesis"
         ])
-        tab_market, tab_comps, tab_value, tab_dcf, tab_health, tab_mpt, tab_ml, tab_bs, tab_tech, tab_season, tab_risk, tab_arb, tab_insider, tab_macro = tabs
+        tab_market, tab_comps, tab_value, tab_dcf, tab_health, tab_mpt, tab_ml, tab_bs, tab_tech, tab_season, tab_risk, tab_arb, tab_insider, tab_macro, tab_ai = tabs
         
         with tab_market:
             if not df_market.empty:
@@ -589,7 +612,6 @@ if st.session_state.app_running and selected_ticker:
                     mpt_data = fetch_peer_history(all_tickers_to_compare, time_horizon)
                     if not mpt_data.empty and isinstance(mpt_data, pd.DataFrame):
                         
-                        # TITAN UPGRADE: Forward Fill and Weekly Resample for Cross-Border Markets
                         mpt_data = mpt_data.ffill().bfill()
                         weekly_data = mpt_data.resample('W').last()
                         ret = weekly_data.pct_change().dropna()
@@ -952,6 +974,38 @@ if st.session_state.app_running and selected_ticker:
                             fig_vix.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', yaxis_title="VIX Level")
                             st.plotly_chart(fig_vix, use_container_width=True)
                 except: st.warning("Macro data currently unavailable.")
+
+        with tab_ai:
+            st.subheader(f"🧠 AI Investment Thesis ({selected_ticker})")
+            st.markdown("Synthesize deterministic quantitative models into an institutional narrative.")
+            
+            if st.button("Generate Thesis", use_container_width=True):
+                v_price = f"{curr_sym}{current_price:.2f}"
+                v_dcf = f"{curr_sym}{ui_dcf_results.get('Base Case', 0):.2f}" if 'ui_dcf_results' in locals() else "N/A (Financial / Alternative Model)"
+                v_wacc = f"{calculated_wacc*100:.2f}%" if 'calculated_wacc' in locals() else "N/A"
+                v_zscore = f"{z_score:.2f} ({model_type})" if 'z_score' in locals() and 'model_type' in locals() else "N/A"
+                v_fscore = f"{f_score}/4" if 'f_score' in locals() else "N/A"
+                v_roic = f"{roic_wacc_spread*100:.2f}%" if 'roic_wacc_spread' in locals() else "N/A"
+                v_rsi = f"{tech_df['RSI'].iloc[-1]:.2f}" if 'tech_df' in locals() and not tech_df.empty and 'RSI' in tech_df.columns else "N/A"
+
+                metrics_summary = f"""
+                - Current Price: {v_price}
+                - DCF Base Case Implied Value: {v_dcf}
+                - Cost of Capital / WACC: {v_wacc}
+                - Altman Z-Score: {v_zscore}
+                - Piotroski F-Score: {v_fscore}
+                - ROIC vs WACC Spread: {v_roic}
+                - RSI (14-Day): {v_rsi}
+                """
+                
+                with st.spinner("Synthesizing quantitative data via Gemini-3.5-Flash..."):
+                    thesis_result = generate_ai_thesis(selected_ticker, full_name, metrics_summary)
+                    
+                    if thesis_result.startswith("ERROR:"):
+                        st.warning(f"Engine failed to generate thesis. {thesis_result}")
+                    else:
+                        st.success("Analysis Complete.")
+                        st.markdown(thesis_result)
 
     else:
         st.error("🚨 Market entity not found.")
