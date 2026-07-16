@@ -288,7 +288,6 @@ if st.session_state.app_running and selected_ticker:
             info, full_name, currency, curr_sym = {}, selected_ticker, "USD", "$"
             deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None, 'total_liabilities': None, 'ebit': None, 'operating_cashflow': None, 'current_assets': None, 'current_liabilities': None}
 
-        # TITAN UPGRADE: Sector Gate Classifications
         sector_str = str(info.get('sector', '')).lower()
         ind_str = str(info.get('industry', '')).lower()
         is_financial = 'bank' in ind_str or 'financial' in sector_str or 'insurance' in ind_str
@@ -323,7 +322,6 @@ if st.session_state.app_running and selected_ticker:
         else:
             calculated_wacc = cost_of_equity
         
-        # Pre-generate PDF DCF/DDM dict to prevent Tear Sheet crash
         pdf_dcf = {}
         if is_financial:
             if dividend_rate and dividend_rate > 0:
@@ -437,7 +435,14 @@ if st.session_state.app_running and selected_ticker:
                     fig_scatter.update_traces(textposition='top center')
                     fig_scatter.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig_scatter, use_container_width=True)
-                st.dataframe(df_comps.style.highlight_max(axis=0, subset=['Net Margin (%)']).format({"P/E Ratio": "{:.2f}x", "EV/EBITDA": "{:.2f}x", "Net Margin (%)": "{:.2f}%"}), use_container_width=True)
+                
+                # TITAN UPGRADE: DataFrame NaN formatting shield
+                df_comps_display = df_comps.fillna(np.nan)
+                st.dataframe(
+                    df_comps_display.style.highlight_max(axis=0, subset=['Net Margin (%)'])
+                    .format({"P/E Ratio": "{:.2f}x", "EV/EBITDA": "{:.2f}x", "Net Margin (%)": "{:.2f}%"}, na_rep="N/A"), 
+                    use_container_width=True
+                )
 
         with tab_value:
             st.subheader("💎 Legendary Value Investing Screener")
