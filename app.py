@@ -240,7 +240,7 @@ Structure your response exactly as follows:
 Metrics:
 {metrics_summary}"""
         response = client.models.generate_content(
-            model="gemini-3.1-pro-preview",
+            model="gemini-3.5-flash",
             contents=prompt
         )
         return response.text
