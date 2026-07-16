@@ -48,11 +48,11 @@ def resolve_automatic_peer(ticker, sector="", industry=""):
     return "INFY.NS" if is_indian else "AAPL"
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_search_candidates(query):
+def search_asset_candidates(query):
     clean_query = query.strip()
     if not clean_query: return []
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_query}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     candidates = []
     try:
         response = requests.get(url, headers=headers, timeout=5)
@@ -65,15 +65,16 @@ def get_search_candidates(query):
                     exch = quote.get('exchange', 'Unknown Exchange')
                     candidates.append({"display": f"{name} ({symbol}) - {exch}", "symbol": symbol})
     except Exception: pass
+    
     if not candidates:
         raw = clean_query.upper().replace(" ", "")
-        candidates.append({"display": f"Exact Ticker Match: {raw}", "symbol": raw})
+        candidates.append({"display": f"Direct Ticker Match: {raw}", "symbol": raw})
         if "." not in raw:
             candidates.append({"display": f"Indian Market Guess: {raw}.NS", "symbol": f"{raw}.NS"})
     return candidates
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_market_data(ticker_symbol, time_horizon="1y"):
+def pull_market_action(ticker_symbol, time_horizon="1y"):
     try:
         df = yf.download(ticker_symbol, period=time_horizon, progress=False)
         if df.empty: return False, None
@@ -98,7 +99,7 @@ def fetch_market_data(ticker_symbol, time_horizon="1y"):
         return False, None
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_peer_history(tickers_list, time_horizon="1y"):
+def pull_peer_action(tickers_list, time_horizon="1y"):
     try:
         df = yf.download(tickers_list, period=time_horizon, progress=False)
         if df.empty: return pd.DataFrame()
@@ -116,7 +117,7 @@ def fetch_peer_history(tickers_list, time_horizon="1y"):
     except Exception: return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_macro_history(time_horizon="1y"):
+def pull_macro_regime(time_horizon="1y"):
     try:
         df = yf.download(['^TNX', '^IRX', '^VIX'], period=time_horizon, progress=False)
         if 'Close' in df.columns: return df['Close']
@@ -124,9 +125,31 @@ def fetch_macro_history(time_horizon="1y"):
     except Exception: return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_ticker_info(ticker):
-    try: return yf.Ticker(ticker).info
-    except: return {}
+def pull_institutional_profile(ticker):
+    """Delegates entirely to yfinance's native engine to utilize curl_cffi cloud bypass."""
+    info_dict = {}
+    tk = yf.Ticker(ticker)
+    
+    try:
+        fast = tk.fast_info
+        info_dict['marketCap'] = getattr(fast, 'market_cap', None)
+        info_dict['sharesOutstanding'] = getattr(fast, 'shares', None)
+        info_dict['fiftyTwoWeekHigh'] = getattr(fast, 'year_high', None)
+        info_dict['fiftyTwoWeekLow'] = getattr(fast, 'year_low', None)
+        info_dict['previousClose'] = getattr(fast, 'previous_close', None)
+        info_dict['currency'] = getattr(fast, 'currency', None)
+        info_dict['exchange'] = getattr(fast, 'exchange', None)
+    except Exception: pass
+
+    try:
+        fetched = tk.info
+        if isinstance(fetched, dict) and 'symbol' in fetched:
+            for k, v in fetched.items():
+                if v is not None and (k not in info_dict or info_dict[k] is None):
+                    info_dict[k] = v
+    except Exception: pass
+        
+    return info_dict
 
 def extract_financial_statements(raw_ticker, info):
     metrics = {
@@ -165,7 +188,7 @@ def extract_financial_statements(raw_ticker, info):
 def generate_pdf_report(ticker, full_name, sector, curr_sym, c_price, info, dcf_results, dupont, graham):
     pdf_sym = "INR " if curr_sym == "₹" else curr_sym
     safe_name = full_name.encode('latin-1', 'ignore').decode('latin-1')
-    safe_sector = sector.encode('latin-1', 'ignore').decode('latin-1')
+    safe_sector = str(sector).encode('latin-1', 'ignore').decode('latin-1')
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
@@ -217,7 +240,7 @@ Structure your response exactly as follows:
 Metrics:
 {metrics_summary}"""
         response = client.models.generate_content(
-            model="gemini-3.5-flash",
+            model="gemini-3.1-pro-preview",
             contents=prompt
         )
         return response.text
@@ -256,7 +279,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 selected_ticker = None
 if raw_input:
-    candidates = get_search_candidates(raw_input)
+    candidates = search_asset_candidates(raw_input)
     if candidates:
         options_dict = {c["display"]: c["symbol"] for c in candidates}
         with cmd_col3:
@@ -275,18 +298,19 @@ if search_button and selected_ticker: st.session_state.app_running = True
 if st.session_state.app_running and selected_ticker:
     st.divider()
     with st.spinner(f"Connecting to Exchange and running Quantitative Engines for {selected_ticker}..."):
-        is_success, df_market = fetch_market_data(selected_ticker, time_horizon)
+        is_success, df_market = pull_market_action(selected_ticker, time_horizon)
     
     if is_success and df_market is not None:
+        raw_ticker = yf.Ticker(selected_ticker)
+        
+        info = pull_institutional_profile(selected_ticker).copy()
+        full_name = info.get('longName', info.get('shortName', selected_ticker))
+        
+        deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None, 'total_liabilities': None, 'ebit': None, 'operating_cashflow': None, 'current_assets': None, 'current_liabilities': None}
         try:
-            raw_ticker = yf.Ticker(selected_ticker)
-            info = get_ticker_info(selected_ticker)
-            full_name = info.get('longName', info.get('shortName', selected_ticker))
-            currency, curr_sym = info.get('currency', 'USD'), "₹" if info.get('currency') == "INR" else "$"
-            deep_metrics = extract_financial_statements(raw_ticker, info)
-        except:
-            info, full_name, currency, curr_sym = {}, selected_ticker, "USD", "$"
-            deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None, 'total_liabilities': None, 'ebit': None, 'operating_cashflow': None, 'current_assets': None, 'current_liabilities': None}
+            extracted_metrics = extract_financial_statements(raw_ticker, info)
+            deep_metrics.update(extracted_metrics)
+        except: pass
 
         sector_str = str(info.get('sector', '')).lower()
         ind_str = str(info.get('industry', '')).lower()
@@ -294,13 +318,28 @@ if st.session_state.app_running and selected_ticker:
         is_manufacturing = 'manufacturing' in sector_str or 'automotive' in ind_str or 'industrial' in sector_str
         is_indian = selected_ticker.endswith('.NS') or selected_ticker.endswith('.BO')
 
+        currency = info.get('currency')
+        if not currency:
+            currency = 'INR' if is_indian else 'USD'
+        info['currency'] = currency
+        curr_sym = "₹" if currency == "INR" else "$"
+
         current_price = df_market['close_price'].iloc[-1] if not df_market.empty else info.get('currentPrice', 1.0)
-        beta_raw = info.get('beta', 1.0)
         
+        if not info.get('fiftyTwoWeekHigh') and not df_market.empty:
+            recent_252 = df_market.tail(252)
+            info['fiftyTwoWeekHigh'] = float(recent_252['close_price'].max())
+            info['fiftyTwoWeekLow'] = float(recent_252['close_price'].min())
+            
+        shares = float(info.get('sharesOutstanding', 0) or 0)
+        if not info.get('marketCap') and shares > 0 and current_price > 0:
+            info['marketCap'] = current_price * shares
+
+        beta_raw = info.get('beta', 1.0)
         raw_rev = float(deep_metrics.get('revenue', 1000000000.0) or 1000000000.0)
         raw_fcf = deep_metrics.get('fcf')
         fcf_base = float(raw_fcf) / 1000000.0 if raw_fcf is not None else (raw_rev * 0.12) / 1000000.0
-        shares = float(info.get('sharesOutstanding', 100000000.0) or 100000000.0) / 1000000.0
+        shares_for_calc = shares / 1000000.0 if shares > 0 else 100.0 
         
         eps, bvps = info.get('trailingEps', 0), info.get('bookValue', 0)
         graham_number = np.sqrt(22.5 * eps * bvps) if eps > 0 and bvps > 0 else 0.0
@@ -334,7 +373,7 @@ if st.session_state.app_running and selected_ticker:
             for n, g in {"Bear Case": 0.04, "Base Case": 0.08, "Bull Case": 0.14}.items():
                 cfs = [safe_fcf * ((1 + g) ** y) for y in range(1, 6)]
                 pv = sum([cfs[t] / ((1 + calculated_wacc) ** (t + 1)) for t in range(5)])
-                pdf_dcf[n] = (pv + (((cfs[-1] * (1 + 0.04)) / (calculated_wacc - 0.04)) / ((1 + calculated_wacc) ** 5))) / shares
+                pdf_dcf[n] = (pv + (((cfs[-1] * (1 + 0.04)) / (calculated_wacc - 0.04)) / ((1 + calculated_wacc) ** 5))) / shares_for_calc
 
         ni, ta, te, rev = deep_metrics['net_income'], deep_metrics['total_assets'], deep_metrics['total_equity'], deep_metrics['revenue']
         dupont_data = {'valid': False}
@@ -344,7 +383,7 @@ if st.session_state.app_running and selected_ticker:
         col_head1, col_head2 = st.columns([3, 1])
         with col_head1:
             st.header(f"📊 {full_name} ({selected_ticker})")
-            st.markdown(f"**Sector:** {info.get('sector', 'N/A')} | **Industry:** {info.get('industry', 'N/A')} | **Exchange:** {info.get('exchange', 'N/A')}")
+            st.markdown(f"**Sector:** {info.get('sector', 'N/A') or 'N/A'} | **Industry:** {info.get('industry', 'N/A') or 'N/A'} | **Exchange:** {info.get('exchange', 'N/A') or 'N/A'}")
         with col_head2:
             st.write("") 
             pdf_bytes = generate_pdf_report(selected_ticker, full_name, info.get('sector', 'N/A'), curr_sym, current_price, info, pdf_dcf, dupont_data, graham_number)
@@ -366,20 +405,25 @@ if st.session_state.app_running and selected_ticker:
                 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
                 m_col1.metric("Latest Close Price", f"{curr_sym}{current_price:.2f}")
                 m_col2.metric("Trading Volume", f"{df_market['volume'].iloc[-1]:,}")
-                m_col3.metric("Total Market Cap", f"{curr_sym}{info.get('marketCap', 0) / 1000000000:.2f} B" if info.get('marketCap') else "N/A")
+                
+                mcap = info.get('marketCap')
+                m_col3.metric("Total Market Cap", f"{curr_sym}{mcap / 1000000000:.2f} B" if mcap else "N/A")
                 m_col4.metric("Systematic Risk (Beta)", f"{info.get('beta', 1.0):.2f}")
                 
                 sm_col1, sm_col2, sm_col3, sm_col4 = st.columns(4)
                 short_ratio = info.get('shortRatio', 'N/A')
-                sm_col1.metric("Short Ratio (Days to Cover)", short_ratio)
-                high_52, low_52 = info.get('fiftyTwoWeekHigh'), info.get('fiftyTwoWeekLow')
-                if high_52 and low_52 and current_price:
-                    dist_to_high = ((current_price - high_52) / high_52) * 100
-                    dist_to_low = ((current_price - low_52) / low_52) * 100
-                else: dist_to_high, dist_to_low = 0, 0
-                sm_col2.metric("52-Week High", f"{curr_sym}{high_52}" if high_52 else "N/A", f"{dist_to_high:.1f}%")
-                sm_col3.metric("52-Week Low", f"{curr_sym}{low_52}" if low_52 else "N/A", f"{dist_to_low:.1f}%")
-                sm_col4.metric("Institutional Ownership", f"{info.get('heldPercentInstitutions', 0) * 100:.2f}%" if info.get('heldPercentInstitutions') else "N/A")
+                sm_col1.metric("Short Ratio (Days to Cover)", short_ratio if short_ratio else "N/A")
+                
+                high_52 = info.get('fiftyTwoWeekHigh')
+                low_52 = info.get('fiftyTwoWeekLow')
+                dist_to_high = ((current_price - high_52) / high_52) * 100 if high_52 and high_52 > 0 else 0
+                dist_to_low = ((current_price - low_52) / low_52) * 100 if low_52 and low_52 > 0 else 0
+                
+                sm_col2.metric("52-Week High", f"{curr_sym}{float(high_52):.2f}" if high_52 else "N/A", f"{dist_to_high:.1f}%" if high_52 else "")
+                sm_col3.metric("52-Week Low", f"{curr_sym}{float(low_52):.2f}" if low_52 else "N/A", f"{dist_to_low:.1f}%" if low_52 else "")
+                
+                inst_own = info.get('heldPercentInstitutions')
+                sm_col4.metric("Institutional Ownership", f"{inst_own * 100:.2f}%" if inst_own else "N/A")
                 
                 st.markdown(f"#### Raw Price Action & Moving Averages ({selected_ticker})")
                 fig_raw = px.line(df_market, x='date', y=['close_price', 'sma_50', 'sma_200'], color_discrete_sequence=['#3b82f6', '#ef4444', '#10b981'])
@@ -390,7 +434,7 @@ if st.session_state.app_running and selected_ticker:
                 benchmark_df = pd.DataFrame()
                 if benchmark_input:
                     try:
-                        b_data = fetch_peer_history([benchmark_input], time_horizon)
+                        b_data = pull_peer_action([benchmark_input], time_horizon)
                         if not b_data.empty:
                             benchmark_df = pd.DataFrame(b_data).dropna().reset_index()
                             benchmark_df.columns = ['date', 'benchmark_close']
@@ -413,7 +457,7 @@ if st.session_state.app_running and selected_ticker:
             resolved_peers = []
             with st.spinner("Resolving peer identities..."):
                 for raw_p in [p.strip() for p in peer_input.split(",") if p.strip()]:
-                    p_cands = get_search_candidates(raw_p)
+                    p_cands = search_asset_candidates(raw_p)
                     if p_cands and p_cands[0]['symbol'] not in resolved_peers and p_cands[0]['symbol'] != selected_ticker:
                         resolved_peers.append(p_cands[0]['symbol'])
             all_tickers_to_compare = [selected_ticker] + resolved_peers
@@ -421,7 +465,7 @@ if st.session_state.app_running and selected_ticker:
             comps_data = []
             for t in all_tickers_to_compare:
                 try:
-                    p_info = get_ticker_info(t)
+                    p_info = pull_institutional_profile(t)
                     comps_data.append({"Ticker": t, "Company Name": p_info.get('shortName', t), "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None})
                 except: pass
             
@@ -436,7 +480,6 @@ if st.session_state.app_running and selected_ticker:
                     fig_scatter.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig_scatter, use_container_width=True)
                 
-                # TITAN UPGRADE: DataFrame NaN formatting shield
                 df_comps_display = df_comps.fillna(np.nan)
                 st.dataframe(
                     df_comps_display.style.highlight_max(axis=0, subset=['Net Margin (%)'])
@@ -518,7 +561,7 @@ if st.session_state.app_running and selected_ticker:
                     cfs = [ui_fcf * ((1 + g) ** y) for y in range(1, 6)]
                     pv = sum([cfs[t] / ((1 + ui_wacc) ** (t + 1)) for t in range(5)])
                     tv = (cfs[-1] * (1 + ui_t_growth)) / (ui_wacc - ui_t_growth)
-                    ui_dcf_results[n] = (pv + (tv / ((1 + ui_wacc) ** 5))) / shares
+                    ui_dcf_results[n] = (pv + (tv / ((1 + ui_wacc) ** 5))) / shares_for_calc
 
                 st.plotly_chart(px.bar(pd.DataFrame(list(ui_dcf_results.items()), columns=["Scenario", "Target Price"]), x="Scenario", y="Target Price", text_auto=".2f", color="Scenario", color_discrete_map={"Bear Case": "#ef4444", "Base Case": "#3b82f6", "Bull Case": "#10b981"}), use_container_width=True)
                 
@@ -531,7 +574,7 @@ if st.session_state.app_running and selected_ticker:
                         cfs = [ui_fcf * ((1 + test_g) ** y) for y in range(1, 6)]
                         pv = sum([cfs[t] / ((1 + ui_wacc) ** (t + 1)) for t in range(5)])
                         tv = (cfs[-1] * (1 + test_g)) / (ui_wacc - test_g)
-                        test_price = (pv + (tv / ((1 + ui_wacc) ** 5))) / shares
+                        test_price = (pv + (tv / ((1 + ui_wacc) ** 5))) / shares_for_calc
                         if abs(test_price - current_price) < closest_diff:
                             closest_diff = abs(test_price - current_price)
                             implied_g_ans = test_g
@@ -546,7 +589,7 @@ if st.session_state.app_running and selected_ticker:
                         cfs = [ui_fcf * ((1 + 0.08) ** y) for y in range(1, 6)]
                         pv = sum([cfs[year] / ((1 + w) ** (year + 1)) for year in range(5)])
                         tv = (cfs[-1] * (1 + t)) / (w - t) if w > t else 0
-                        matrix[i, j] = (pv + (tv / ((1 + w) ** 5))) / shares
+                        matrix[i, j] = (pv + (tv / ((1 + w) ** 5))) / shares_for_calc
                 fig_heat = px.imshow(matrix, labels=dict(x="Terminal Growth Rate", y="Discount Rate (WACC)", color="Implied Price"), x=[f"{x*100:.1f}%" for x in tg_range], y=[f"{y*100:.1f}%" for y in wacc_range], text_auto=".2f", color_continuous_scale="RdYlGn")
                 st.plotly_chart(fig_heat, use_container_width=True)
 
@@ -614,7 +657,7 @@ if st.session_state.app_running and selected_ticker:
             st.subheader("Modern Portfolio Theory (MPT) Optimization")
             if len(all_tickers_to_compare) >= 2:
                 with st.spinner("Running SLSQP Constrained Optimization..."):
-                    mpt_data = fetch_peer_history(all_tickers_to_compare, time_horizon)
+                    mpt_data = pull_peer_action(all_tickers_to_compare, time_horizon)
                     if not mpt_data.empty and isinstance(mpt_data, pd.DataFrame):
                         
                         mpt_data = mpt_data.ffill().bfill()
@@ -910,7 +953,7 @@ if st.session_state.app_running and selected_ticker:
             if arb_pair:
                 with st.spinner(f"Pulling dynamic arbitrage spread analytics for {arb_pair}..."):
                     try:
-                        arb_data = fetch_peer_history([arb_pair.strip()], time_horizon)
+                        arb_data = pull_peer_action([arb_pair.strip()], time_horizon)
                         if not arb_data.empty:
                             arb_df = pd.DataFrame(arb_data).dropna().reset_index()
                             arb_df.columns = ['date', 'arb_close']
@@ -962,7 +1005,7 @@ if st.session_state.app_running and selected_ticker:
             st.subheader("🌐 Global Macroeconomic Regime")
             with st.spinner("Fetching Treasury Yields and Volatility Index..."):
                 try:
-                    yield_data = fetch_macro_history(time_horizon)
+                    yield_data = pull_macro_regime(time_horizon)
                     if not yield_data.empty:
                         yield_data = yield_data.dropna()
                         yield_data['Yield_Spread'] = yield_data['^TNX'] - yield_data['^IRX']
