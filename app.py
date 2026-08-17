@@ -1085,7 +1085,7 @@ def generate_pdf_report(ctx: dict) -> bytes:
     )
     pdf.set_text_color(0, 0, 0)
 
-    return bytes(pdf.output(dest="S"))
+    return pdf.output(dest="S").encode("latin-1")
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
