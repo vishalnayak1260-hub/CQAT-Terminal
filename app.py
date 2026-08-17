@@ -1096,35 +1096,29 @@ def generate_ai_thesis(ticker, full_name, metrics_summary):
 Analyze these metrics for {full_name} ({ticker}):
 {metrics_summary}
 
-You must return a response strictly in valid JSON format. Do not include markdown code blocks or wrappers outside the JSON.
+You must return a response strictly in valid JSON format.
 The JSON must follow this schema exactly:
 {{
-    "verdict": "BUY", "HOLD", or "SELL",
-    "target_rationale": "One sentence punchy summary.",
-    "variant_perception": "What unique insight does the data reveal that the broader market might be missing?",
-    "valuation_case": "Analysis of DCF, WACC, and intrinsic margin of safety.",
-    "core_risk_factor": "The absolute biggest structural or quantitative vulnerability found in the data.",
-    "quantitative_grounding": ["List 2-3 key metrics and their exact values that proved your point"]
+    "verdict": "BUY",
+    "target_rationale": "One sentence summary.",
+    "variant_perception": "Unique insight.",
+    "valuation_case": "Analysis of DCF and WACC.",
+    "core_risk_factor": "Biggest vulnerability.",
+    "quantitative_grounding": ["Data point 1", "Data point 2"]
 }}"""
 
+        # Forcing native JSON at the API level
         response = client.models.generate_content(
             model="gemini-3.5-flash",
             contents=prompt,
+            config={"response_mime_type": "application/json"}
         )
         
-        # Bulletproof JSON extraction: find the actual JSON boundaries
-        text = response.text
-        start = text.find('{')
-        end = text.rfind('}')
-        
-        if start != -1 and end != -1:
-            clean_text = text[start:end+1]
-            return json.loads(clean_text)
-        else:
-            return None
+        return json.loads(response.text)
             
     except Exception as e:
-        return None
+        # Returning the literal error instead of swallowing it
+        return f"ERROR: {str(e)} | RAW TEXT: {getattr(response, 'text', 'No text returned')}"
 
 # ==========================================
 # 3. SIDEBAR: MACRO CONTROL DECK
@@ -1981,11 +1975,11 @@ if st.session_state.app_running and selected_ticker:
                 except: st.warning("Macro data currently unavailable.")
 
         with tab_ai:
+            with tab_ai:
             st.subheader(f"🧠 Institutional AI Synthesis ({selected_ticker})")
             st.markdown("Synthesize deterministic quantitative models into a structured narrative.")
             
             if st.button("Run Quantitative Synthesis", use_container_width=True):
-                # Bulletproof Variable Formatting (Fixes the TypeError)
                 v_price = f"{curr_sym}{current_price:.2f}" if current_price is not None else "N/A"
                 v_dcf = f"{curr_sym}{ui_dcf_results.get('Base Case', 0):.2f}" if 'ui_dcf_results' in locals() and ui_dcf_results else "N/A"
                 v_wacc = f"{calculated_wacc*100:.2f}%" if calculated_wacc is not None else "N/A"
@@ -2007,7 +2001,7 @@ if st.session_state.app_running and selected_ticker:
                 with st.spinner("Executing multi-variable semantic analysis via Gemini..."):
                     thesis_data = generate_ai_thesis(selected_ticker, full_name, metrics_summary)
                     
-                    if thesis_data and isinstance(thesis_data, dict):
+                    if isinstance(thesis_data, dict):
                         col1, col2 = st.columns([1, 3])
                         with col1:
                             v_color = "green" if thesis_data.get('verdict') == "BUY" else ("red" if thesis_data.get('verdict') == "SELL" else "orange")
@@ -2029,5 +2023,9 @@ if st.session_state.app_running and selected_ticker:
                             st.markdown("**Core Data Pillars Used:**")
                             for item in thesis_data.get('quantitative_grounding', []):
                                 st.markdown(f"- `{item}`")
+                                
+                    elif isinstance(thesis_data, str) and thesis_data.startswith("ERROR:"):
+                        # This will print the exact reason it failed to your screen
+                        st.error(f"API Diagnostics: {thesis_data}")
                     else:
                         st.warning("Engine failed to parse structured thesis. Please try again.")
