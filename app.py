@@ -1093,22 +1093,30 @@ def generate_pdf_report(ctx: dict) -> bytes:
 def generate_ai_thesis(ticker, full_name, metrics_summary):
     try:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-        prompt = f"""You are an institutional equity research analyst specializing in quantitative corporate finance. 
-Analyze these metrics for {full_name} ({ticker}):
+        prompt = f"""You are a senior institutional equity research analyst.
+Conduct a rigorous valuation and fundamental assessment for {full_name} ({ticker}) using the provided quantitative dataset:
+
 {metrics_summary}
 
-You must return a response strictly in valid JSON format.
-The JSON must follow this schema exactly:
+Analytical Directives:
+1. Balance intrinsic cash-flow DCF targets against trading multiples (P/E, EV/EBITDA), return on capital (ROIC vs WACC), and balance sheet safety (Altman Z, Piotroski F).
+2. Do not issue a default 'SELL' solely based on DCF sensitivity if ROIC spread, moat, and market multiples reflect strong capital allocation and reasonable market pricing.
+3. Issue a 'BUY' if ROIC exceeds WACC with robust solvency and reasonable growth runway. Issue 'HOLD' if fairly priced or mixed signals. Issue 'SELL' if structural deterioration, negative ROIC spread, or severe insolvency risks exist.
+
+Return STRICT, valid JSON adhering to this schema:
 {{
-    "verdict": "BUY",
-    "target_rationale": "One sentence summary.",
-    "variant_perception": "Unique insight.",
-    "valuation_case": "Analysis of DCF and WACC.",
-    "core_risk_factor": "Biggest vulnerability.",
-    "quantitative_grounding": ["Data point 1", "Data point 2"]
+    "verdict": "BUY | HOLD | SELL",
+    "target_rationale": "One concise, data-grounded sentence summarizing the core investment stance.",
+    "variant_perception": "Key operational or market dynamic that the consensus narrative is mispricing.",
+    "valuation_case": "Concise synthesis of intrinsic DCF scenario targets vs current market trading price and WACC.",
+    "core_risk_factor": "The single most critical structural, financial, or competitive risk identified in the data.",
+    "quantitative_grounding": [
+        "Metric 1 with exact numerical comparison",
+        "Metric 2 with exact numerical comparison",
+        "Metric 3 with exact numerical comparison"
+    ]
 }}"""
 
-        # Forcing native JSON at the API level
         response = client.models.generate_content(
             model="gemini-3.5-flash",
             contents=prompt,
@@ -1116,10 +1124,8 @@ The JSON must follow this schema exactly:
         )
         
         return json.loads(response.text)
-            
     except Exception as e:
-        # Returning the literal error instead of swallowing it
-        return f"ERROR: {str(e)} | RAW TEXT: {getattr(response, 'text', 'No text returned')}"
+        return f"ERROR: {str(e)}"
 
 # ==========================================
 # 3. SIDEBAR: MACRO CONTROL DECK
@@ -1235,19 +1241,42 @@ if st.session_state.app_running and selected_ticker:
         else:
             calculated_wacc = cost_of_equity
         
-        pdf_dcf = {}
-        if is_financial:
-            if dividend_rate and dividend_rate > 0:
-                ke_bank = current_rf + (beta_raw * global_erp)
-                g_bank = 0.04
-                if ke_bank > g_bank:
-                    pdf_dcf["DDM Target"] = (dividend_rate * (1 + g_bank)) / (ke_bank - g_bank)
+        # Normalized Cash Flow & Share Units
+        shares_count = float(info.get('sharesOutstanding') or shares or 1.0)
+        total_cash = float(info.get('totalCash') or 0.0)
+        total_debt_val = float(info.get('totalDebt') or total_debt or 0.0)
+
+        # Baseline FCF fallback in raw currency units
+        if raw_fcf is not None and float(raw_fcf) > 0:
+            fcf_raw_base = float(raw_fcf)
         else:
-            safe_fcf = fcf_base if fcf_base > 0 else (raw_rev * 0.10) / 1000000.0
-            for n, g in {"Bear Case": 0.04, "Base Case": 0.08, "Bull Case": 0.14}.items():
-                cfs = [safe_fcf * ((1 + g) ** y) for y in range(1, 6)]
-                pv = sum([cfs[t] / ((1 + calculated_wacc) ** (t + 1)) for t in range(5)])
-                pdf_dcf[n] = (pv + (((cfs[-1] * (1 + 0.04)) / (calculated_wacc - 0.04)) / ((1 + calculated_wacc) ** 5))) / shares_for_calc
+            fcf_raw_base = raw_rev * 0.18  # Normalized 18% FCF margin proxy
+
+        # DCF Scenario Builder with Enterprise-to-Equity Bridge
+        pdf_dcf = {}
+        if not is_financial:
+            for n, g in {"Bear Case": 0.05, "Base Case": 0.10, "Bull Case": 0.16}.items():
+                discounted_cfs = [
+                    (fcf_raw_base * ((1 + g) ** y)) / ((1 + calculated_wacc) ** y)
+                    for y in range(1, 6)
+                ]
+                pv_fcf = sum(discounted_cfs)
+                
+                # Terminal Value calculation
+                terminal_fcf = fcf_raw_base * ((1 + g) ** 5) * (1 + 0.035)
+                terminal_denom = max(calculated_wacc - 0.035, 0.02)
+                tv = terminal_fcf / terminal_denom
+                pv_tv = tv / ((1 + calculated_wacc) ** 5)
+                
+                # Enterprise Value to Equity Value Bridge
+                enterprise_val = pv_fcf + pv_tv
+                equity_val = enterprise_val + total_cash - total_debt_val
+                
+                # Safeguard: Ensure we don't divide by zero or negative shares
+                safe_shares = max(shares_count, 1.0)
+                implied_target = equity_val / safe_shares
+                
+                pdf_dcf[n] = max(implied_target, 0.01)
 
         ni, ta, te, rev = deep_metrics['net_income'], deep_metrics['total_assets'], deep_metrics['total_equity'], deep_metrics['revenue']
         dupont_data = {'valid': False}
