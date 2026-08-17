@@ -11,6 +11,7 @@ import scipy.optimize as sco
 from google import genai
 import io
 from datetime import datetime
+import json
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
