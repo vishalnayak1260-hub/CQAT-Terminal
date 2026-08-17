@@ -9,6 +9,15 @@ from fpdf import FPDF
 import scipy.stats as si
 import scipy.optimize as sco
 from google import genai
+import io
+from datetime import datetime
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.chart import LineChart, Reference
 
 # ==========================================
 # 1. PAGE CONFIGURATION & CUSTOM CSS
@@ -185,67 +194,929 @@ def extract_financial_statements(raw_ticker, info):
     except Exception: pass
     return metrics
 
-def generate_pdf_report(ticker, full_name, sector, curr_sym, c_price, info, dcf_results, dupont, graham):
-    pdf_sym = "INR " if curr_sym == "₹" else curr_sym
-    safe_name = full_name.encode('latin-1', 'ignore').decode('latin-1')
-    safe_sector = str(sector).encode('latin-1', 'ignore').decode('latin-1')
-    pdf = FPDF()
+def extract_multi_year_financials(raw_ticker):
+    """Pulls up to 4 fiscal years of core line items for the Excel model historical financials tab. Falls back to empty lists if unavailable."""
+    years, hist = [], {
+        'revenue': [], 'net_income': [], 'ebit': [], 'ocf': [], 'fcf': [],
+        'total_assets': [], 'total_equity': [], 'total_liabilities': [],
+        'current_assets': [], 'current_liabilities': []
+    }
+    try:
+        inc, bs, cf = raw_ticker.financials, raw_ticker.balance_sheet, raw_ticker.cashflow
+        if inc.empty and bs.empty:
+            return years, hist
+        cols = inc.columns if not inc.empty else bs.columns
+        years = [c.strftime('%Y') if hasattr(c, 'strftime') else str(c) for c in cols][:4]
+        n = len(years)
+
+        def pull(df, keys):
+            row = None
+            for k in keys:
+                if not df.empty and k in df.index:
+                    row = df.loc[k]
+                    break
+            if row is None:
+                return [None] * n
+            vals = list(row.values)[:n]
+            return vals + [None] * (n - len(vals))
+
+        hist['revenue'] = pull(inc, ['Total Revenue', 'Operating Revenue', 'Revenue'])
+        hist['net_income'] = pull(inc, ['Net Income', 'Net Income Common Stockholders'])
+        hist['ebit'] = pull(inc, ['EBITDA', 'Normalized EBITDA'])
+        hist['ocf'] = pull(cf, ['Operating Cash Flow'])
+        hist['fcf'] = pull(cf, ['Free Cash Flow'])
+        hist['total_assets'] = pull(bs, ['Total Assets'])
+        hist['total_equity'] = pull(bs, ['Stockholders Equity', 'Common Stock Equity'])
+        hist['total_liabilities'] = pull(bs, ['Total Liabilities Net Minority Interest'])
+        hist['current_assets'] = pull(bs, ['Total Current Assets', 'Current Assets'])
+        hist['current_liabilities'] = pull(bs, ['Total Current Liabilities', 'Current Liabilities'])
+    except Exception:
+        pass
+    return years, hist
+
+
+# ---------------------------------------------------------------- palette --
+NAVY = "1E293B"
+BLUE_HDR = "1D4ED8"
+LIGHT_BLUE = "DBEAFE"
+YELLOW = "FFF9C4"
+GREY = "F1F5F9"
+WHITE = "FFFFFF"
+INPUT_BLUE = "0000FF"
+LINK_GREEN = "007A33"
+BLACK = "000000"
+
+FONT_NAME = "Calibri"
+
+TITLE_FONT = Font(name=FONT_NAME, size=16, bold=True, color=WHITE)
+SUBTITLE_FONT = Font(name=FONT_NAME, size=10, color=WHITE)
+SECTION_FONT = Font(name=FONT_NAME, size=12, bold=True, color=WHITE)
+LABEL_FONT = Font(name=FONT_NAME, size=10, bold=True, color=NAVY)
+NOTE_FONT = Font(name=FONT_NAME, size=8, italic=True, color="64748B")
+INPUT_FONT = Font(name=FONT_NAME, size=10, color=INPUT_BLUE, bold=False)
+FORMULA_FONT = Font(name=FONT_NAME, size=10, color=BLACK)
+LINK_FONT = Font(name=FONT_NAME, size=10, color=LINK_GREEN)
+HEADER_FILL = PatternFill("solid", fgColor=NAVY)
+SECTION_FILL = PatternFill("solid", fgColor=BLUE_HDR)
+YELLOW_FILL = PatternFill("solid", fgColor=YELLOW)
+GREY_FILL = PatternFill("solid", fgColor=GREY)
+
+THIN = Side(style="thin", color="CBD5E1")
+BOX = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+CUR_FMT = '#,##0.00;(#,##0.00);"-"'
+PCT_FMT = '0.0%;(0.0%);"-"'
+MULT_FMT = '0.00"x"'
+NUM_FMT = '#,##0;(#,##0);"-"'
+
+
+def _banner(ws, text, subtitle=None, span=8, row=1, height=32):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=span)
+    c = ws.cell(row=row, column=1, value=text)
+    c.font = TITLE_FONT
+    c.fill = HEADER_FILL
+    c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[row].height = height
+    if subtitle:
+        ws.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=span)
+        c2 = ws.cell(row=row + 1, column=1, value=subtitle)
+        c2.font = SUBTITLE_FONT
+        c2.fill = HEADER_FILL
+        c2.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws.row_dimensions[row + 1].height = 18
+
+
+def _section(ws, row, text, span=8):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=span)
+    c = ws.cell(row=row, column=1, value=text)
+    c.font = SECTION_FONT
+    c.fill = SECTION_FILL
+    c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    ws.row_dimensions[row].height = 20
+    return row + 1
+
+
+def _kv(ws, row, label, value, col=1, fmt=None, font=None, fill=None, note=None):
+    lc = ws.cell(row=row, column=col, value=label)
+    lc.font = LABEL_FONT
+    vc = ws.cell(row=row, column=col + 1, value=value)
+    vc.font = font or FORMULA_FONT
+    if fmt:
+        vc.number_format = fmt
+    if fill:
+        vc.fill = fill
+    vc.border = BOX
+    if note:
+        nc = ws.cell(row=row, column=col + 2, value=note)
+        nc.font = NOTE_FONT
+    return row + 1
+
+
+def _set_widths(ws, widths):
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+def _page_setup(ws):
+    ws.page_setup.orientation = "landscape"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+
+
+def generate_excel_model(ctx: dict) -> bytes:
+    """
+    ctx expects the following keys (all optional, sensible fallbacks used):
+    ticker, full_name, sector, industry, exchange, currency, curr_sym,
+    current_price, market_cap, beta, pe, div_yield, high_52, low_52,
+    shares_out (absolute, not millions),
+    hist_years (list[str]), hist (dict of lists, same length as hist_years):
+        revenue, net_income, total_assets, total_equity, total_liabilities,
+        ebit, ocf, fcf, current_assets, current_liabilities
+    rf, erp, cost_of_debt, tax_rate, total_debt,
+    fcf_base (millions), wacc, cost_of_equity,
+    growth_bear, growth_base, growth_bull, terminal_growth,
+    graham_number, dividend_rate,
+    dupont (dict: npm, ato, em, roe, valid),
+    z_score, z_model_type, z_safe_limit, z_distress_limit,
+    f_score,
+    comps (list of dict: ticker, name, pe, ev_ebitda, net_margin),
+    price_df (DataFrame: date, close_price, volume, sma_50, sma_200)
+    """
+    wb = Workbook()
+
+    ticker = ctx.get("ticker", "N/A")
+    full_name = ctx.get("full_name", ticker)
+    curr_sym = ctx.get("curr_sym", "$")
+    currency = ctx.get("currency", "USD")
+    today_str = datetime.now().strftime("%d %b %Y")
+
+    # ============================================================ SUMMARY ==
+    ws = wb.active
+    ws.title = "Summary"
+    ws.sheet_view.showGridLines = False
+    _set_widths(ws, [28, 16, 16, 18, 15, 15, 15, 15])
+    _page_setup(ws)
+    _banner(ws, f"{full_name} ({ticker}) — Institutional Financial Model",
+            f"Sector: {ctx.get('sector','N/A')}  |  Industry: {ctx.get('industry','N/A')}  |  "
+            f"Exchange: {ctx.get('exchange','N/A')}  |  Generated {today_str}", span=8)
+
+    r = 4
+    r = _section(ws, r, "Market Snapshot", span=8)
+    price_row = r
+    r = _kv(ws, r, "Current Price", ctx.get("current_price", 0), fmt=CUR_FMT, font=INPUT_FONT)
+    r = _kv(ws, r, "Market Cap ($mm)", (ctx.get("market_cap") or 0) / 1_000_000, fmt=NUM_FMT, font=INPUT_FONT)
+    r = _kv(ws, r, "52-Week High", ctx.get("high_52", 0), fmt=CUR_FMT, font=INPUT_FONT)
+    r = _kv(ws, r, "52-Week Low", ctx.get("low_52", 0), fmt=CUR_FMT, font=INPUT_FONT)
+    r = _kv(ws, r, "Trailing P/E", ctx.get("pe", 0), fmt=MULT_FMT, font=INPUT_FONT)
+    r = _kv(ws, r, "Beta", ctx.get("beta", 1.0), fmt='0.00', font=INPUT_FONT)
+    r = _kv(ws, r, "Dividend Yield", ctx.get("div_yield", 0), fmt=PCT_FMT, font=INPUT_FONT)
+    r = _kv(ws, r, "Shares Outstanding (mm)", (ctx.get("shares_out") or 0) / 1_000_000, fmt=NUM_FMT, font=INPUT_FONT)
+    r += 1
+
+    r = _section(ws, r, "Valuation Summary (linked to DCF Model)", span=8)
+    headers = ["Scenario", "Implied Price", "Current Price", "Upside / (Downside)"]
+    for i, h in enumerate(headers):
+        c = ws.cell(row=r, column=1 + i, value=h)
+        c.font = LABEL_FONT
+        c.fill = GREY_FILL
+        c.border = BOX
+    r += 1
+    scenarios = ["Bear Case", "Base Case", "Bull Case"]
+    summary_dcf_rows = {}
+    for sc in scenarios:
+        summary_dcf_rows[sc] = r  # implied price placeholder filled in after DCF sheet is built
+        ws.cell(row=r, column=1, value=sc).font = FORMULA_FONT
+        c2 = ws.cell(row=r, column=2, value=0)  # placeholder, re-pointed to DCF sheet below
+        c2.font = LINK_FONT
+        c2.number_format = CUR_FMT
+        c3 = ws.cell(row=r, column=3, value=f"=$B${price_row}")
+        c3.font = FORMULA_FONT
+        c3.number_format = CUR_FMT
+        c4 = ws.cell(row=r, column=4, value=f"=(B{r}-C{r})/C{r}")
+        c4.font = FORMULA_FONT
+        c4.number_format = PCT_FMT
+        for cc in range(1, 5):
+            ws.cell(row=r, column=cc).border = BOX
+        r += 1
+    base_case_row = summary_dcf_rows["Base Case"]
+    r += 1
+
+    r = _section(ws, r, "Signal Check", span=8)
+    ws.cell(row=r, column=1, value="Graham Number (Defensive Value)").font = LABEL_FONT
+    gc = ws.cell(row=r, column=2, value=ctx.get("graham_number", 0)); gc.font = INPUT_FONT; gc.number_format = CUR_FMT
+    r += 1
+    ws.cell(row=r, column=1, value="Verdict vs. Base Case DCF").font = LABEL_FONT
+    vc = ws.cell(row=r, column=2, value=f'=IF(B{base_case_row}>C{base_case_row},"Undervalued","Overvalued")')
+    vc.font = FORMULA_FONT
+    r += 2
+    note = ws.cell(row=r, column=1,
+                    value="Blue = source input   Black = formula   Green = cross-sheet link   "
+                          "Yellow = key assumption to edit. Edit the Assumptions tab to flex the model.")
+    note.font = NOTE_FONT
+
+    # ========================================================= ASSUMPTIONS ==
+    ws2 = wb.create_sheet("Assumptions")
+    ws2.sheet_view.showGridLines = False
+    _set_widths(ws2, [30, 16, 4, 40])
+    _page_setup(ws2)
+    _banner(ws2, "Assumptions & Cost of Capital", "Edit the yellow cells — every model tab recalculates.", span=4)
+
+    r = 4
+    r = _section(ws2, r, "Capital Structure & Discount Rate", span=4)
+    a_rf = r; _kv(ws2, r, "Risk-Free Rate", ctx.get("rf", 0.045), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_beta = r; _kv(ws2, r, "Beta", ctx.get("beta", 1.0), fmt='0.00', font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_erp = r; _kv(ws2, r, "Equity Risk Premium", ctx.get("erp", 0.055), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_ke = r; ws2.cell(row=r, column=1, value="Cost of Equity (Ke)").font = LABEL_FONT
+    ce = ws2.cell(row=r, column=2, value=f"=B{a_rf}+(B{a_beta}*B{a_erp})"); ce.font = FORMULA_FONT; ce.number_format = PCT_FMT; ce.border = BOX
+    r += 1
+    a_kd = r; _kv(ws2, r, "Pre-Tax Cost of Debt", ctx.get("cost_of_debt", ctx.get("rf", 0.045) + 0.02), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_tax = r; _kv(ws2, r, "Tax Rate", ctx.get("tax_rate", 0.25), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_debt = r; _kv(ws2, r, "Total Debt ($mm)", (ctx.get("total_debt") or 0) / 1_000_000, fmt=NUM_FMT, font=INPUT_FONT); r += 1
+    a_mcap = r; _kv(ws2, r, "Market Cap ($mm)", (ctx.get("market_cap") or 0) / 1_000_000, fmt=NUM_FMT, font=INPUT_FONT); r += 1
+    a_we = r; ws2.cell(row=r, column=1, value="Weight of Equity").font = LABEL_FONT
+    we = ws2.cell(row=r, column=2, value=f"=B{a_mcap}/(B{a_mcap}+B{a_debt})"); we.font = FORMULA_FONT; we.number_format = PCT_FMT; we.border = BOX
+    r += 1
+    a_wd = r; ws2.cell(row=r, column=1, value="Weight of Debt").font = LABEL_FONT
+    wd = ws2.cell(row=r, column=2, value=f"=1-B{a_we}"); wd.font = FORMULA_FONT; wd.number_format = PCT_FMT; wd.border = BOX
+    r += 1
+    a_wacc = r; ws2.cell(row=r, column=1, value="WACC").font = LABEL_FONT
+    wacc_c = ws2.cell(row=r, column=2, value=f"=(B{a_we}*B{a_ke})+(B{a_wd}*B{a_kd}*(1-B{a_tax}))")
+    wacc_c.font = FORMULA_FONT; wacc_c.number_format = PCT_FMT; wacc_c.border = BOX; wacc_c.fill = PatternFill("solid", fgColor="D1FAE5")
+    r += 2
+
+    r = _section(ws2, r, "DCF Growth Scenarios", span=4)
+    a_fcf = r; _kv(ws2, r, "Base FCF ($mm)", ctx.get("fcf_base", 0), fmt=NUM_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_bear = r; _kv(ws2, r, "Bear Case Growth (5yr)", ctx.get("growth_bear", 0.04), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_base = r; _kv(ws2, r, "Base Case Growth (5yr)", ctx.get("growth_base", 0.08), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_bull = r; _kv(ws2, r, "Bull Case Growth (5yr)", ctx.get("growth_bull", 0.14), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_term = r; _kv(ws2, r, "Terminal Growth Rate", ctx.get("terminal_growth", 0.04), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_shares = r; _kv(ws2, r, "Shares Outstanding (mm)", (ctx.get("shares_out") or 0) / 1_000_000, fmt=NUM_FMT, font=INPUT_FONT); r += 2
+
+    note2 = ws2.cell(row=r, column=1, value=f"Source: Yahoo Finance (yfinance), pulled {today_str}. WACC and Ke are live formulas — flex Beta or ERP to stress-test.")
+    note2.font = NOTE_FONT
+
+    A = "Assumptions"  # sheet name shorthand for formulas
+
+    # ============================================================ DCF MODEL ==
+    ws3 = wb.create_sheet("DCF Model")
+    ws3.sheet_view.showGridLines = False
+    _set_widths(ws3, [26, 14, 14, 14, 14, 14, 14])
+    _page_setup(ws3)
+    _banner(ws3, "Discounted Cash Flow — 5-Year FCF Projection", "Three-scenario build, linked to Assumptions tab.", span=7)
+
+    r = 4
+    r = _section(ws3, r, "Year", span=7)
+    ws3.cell(row=r, column=1, value="Scenario").font = LABEL_FONT
+    for y in range(1, 6):
+        c = ws3.cell(row=r, column=1 + y, value=f"Year {y}")
+        c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX
+    r += 1
+
+    fcf_rows = {}
+    for sc, growth_row in [("Bear Case", a_bear), ("Base Case", a_base), ("Bull Case", a_bull)]:
+        ws3.cell(row=r, column=1, value=f"{sc} — Projected FCF ($mm)").font = FORMULA_FONT
+        for y in range(1, 6):
+            col = 1 + y
+            col_l = get_column_letter(col)
+            prev_l = get_column_letter(col - 1)
+            if y == 1:
+                formula = f"='{A}'!$B${a_fcf}*(1+'{A}'!$B${growth_row})"
+            else:
+                formula = f"={prev_l}{r}*(1+'{A}'!$B${growth_row})"
+            cc = ws3.cell(row=r, column=col, value=formula)
+            cc.font = LINK_FONT; cc.number_format = NUM_FMT; cc.border = BOX
+        fcf_rows[sc] = r
+        r += 1
+    r += 1
+
+    r = _section(ws3, r, "Present Value & Implied Share Price", span=7)
+    header_row = r
+    for i, h in enumerate(["Scenario", "PV of 5-Yr FCF", "Terminal Value", "PV of TV", "Enterprise Value", "Implied Price"]):
+        c = ws3.cell(row=r, column=1 + i, value=h)
+        c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX
+    r += 1
+    dcf_summary_rows = {}
+    for sc in ["Bear Case", "Base Case", "Bull Case"]:
+        fr = fcf_rows[sc]
+        ws3.cell(row=r, column=1, value=sc).font = FORMULA_FONT
+        # PV of 5-yr FCF: sum of FCF_y / (1+WACC)^y
+        pv_terms = "+".join([f"{get_column_letter(1+y)}{fr}/(1+'{A}'!$B${a_wacc})^{y}" for y in range(1, 6)])
+        pv_c = ws3.cell(row=r, column=2, value=f"={pv_terms}")
+        pv_c.font = LINK_FONT; pv_c.number_format = NUM_FMT; pv_c.border = BOX
+        # Terminal value (Gordon growth on Year 5 FCF)
+        y5 = f"{get_column_letter(6)}{fr}"
+        tv_c = ws3.cell(row=r, column=3, value=f"={y5}*(1+'{A}'!$B${a_term})/('{A}'!$B${a_wacc}-'{A}'!$B${a_term})")
+        tv_c.font = LINK_FONT; tv_c.number_format = NUM_FMT; tv_c.border = BOX
+        # PV of TV
+        pvtv_c = ws3.cell(row=r, column=4, value=f"=C{r}/(1+'{A}'!$B${a_wacc})^5")
+        pvtv_c.font = FORMULA_FONT; pvtv_c.number_format = NUM_FMT; pvtv_c.border = BOX
+        # Enterprise/equity value
+        ev_c = ws3.cell(row=r, column=5, value=f"=B{r}+D{r}")
+        ev_c.font = FORMULA_FONT; ev_c.number_format = NUM_FMT; ev_c.border = BOX
+        # Implied price
+        ip_c = ws3.cell(row=r, column=6, value=f"=E{r}/'{A}'!$B${a_shares}")
+        ip_c.font = FORMULA_FONT; ip_c.number_format = CUR_FMT; ip_c.border = BOX
+        ip_c.fill = PatternFill("solid", fgColor="D1FAE5")
+        dcf_summary_rows[sc] = r
+        r += 1
+
+    # Re-point the Summary sheet's placeholder implied-price cells to the actual
+    # DCF Model rows now that this sheet's layout is finalized.
+    for sc, target_row in summary_dcf_rows.items():
+        target_cell = ws.cell(row=target_row, column=2)
+        target_cell.value = f"='DCF Model'!F{dcf_summary_rows[sc]}"
+        target_cell.font = LINK_FONT
+        target_cell.number_format = CUR_FMT
+
+    r += 1
+    r = _section(ws3, r, "WACC vs. Terminal Growth Sensitivity (Base Case Growth Path)", span=7)
+    base_fr = fcf_rows["Base Case"]
+    sens_header_row = r
+    ws3.cell(row=r, column=1, value="Implied Price").font = LABEL_FONT
+    ws3.cell(row=r, column=1).fill = GREY_FILL
+    ws3.cell(row=r, column=1).border = BOX
+    tg_offsets = [-0.01, -0.005, 0, 0.005, 0.01]
+    for j, off in enumerate(tg_offsets):
+        c = ws3.cell(row=r, column=2 + j, value=f"='{A}'!$B${a_term}+({off})")
+        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX; c.fill = GREY_FILL
+    r += 1
+    wacc_offsets = [-0.02, -0.01, 0, 0.01, 0.02]
+    for i, woff in enumerate(wacc_offsets):
+        wacc_cell_row = r
+        wlabel = ws3.cell(row=r, column=1, value=f"='{A}'!$B${a_wacc}+({woff})")
+        wlabel.font = FORMULA_FONT; wlabel.number_format = PCT_FMT; wlabel.border = BOX; wlabel.fill = GREY_FILL
+        for j, off in enumerate(tg_offsets):
+            col = 2 + j
+            col_l = get_column_letter(col)
+            tg_ref = f"{col_l}{sens_header_row}"
+            w_ref = f"$A{wacc_cell_row}"
+            pv_terms = "+".join([f"{get_column_letter(1+y)}{base_fr}/(1+{w_ref})^{y}" for y in range(1, 6)])
+            y5 = f"{get_column_letter(6)}{base_fr}"
+            formula = f"=(({pv_terms})+(({y5}*(1+{tg_ref}))/({w_ref}-{tg_ref}))/(1+{w_ref})^5)/'{A}'!$B${a_shares}"
+            cc = ws3.cell(row=r, column=col, value=formula)
+            cc.font = FORMULA_FONT; cc.number_format = CUR_FMT; cc.border = BOX
+        r += 1
+
+    r += 1
+    ws3.cell(row=r, column=1, value="Rows = WACC (base ± 2%)   Columns = Terminal Growth (base ± 1%)   "
+                                     "Values = implied price per share under the Base Case FCF path.").font = NOTE_FONT
+
+    # ================================================== HISTORICAL FINANCIALS ==
+    ws4 = wb.create_sheet("Historical Financials")
+    ws4.sheet_view.showGridLines = False
+    hist_years = ctx.get("hist_years", ["FY"])
+    hist = ctx.get("hist", {})
+    n_years = len(hist_years)
+    _set_widths(ws4, [26] + [14] * n_years)
+    _page_setup(ws4)
+    _banner(ws4, "Historical Financial Statements ($mm)", "Source: Company filings via Yahoo Finance.", span=1 + n_years)
+
+    r = 4
+    r = _section(ws4, r, "Income Statement & Cash Flow", span=1 + n_years)
+    ws4.cell(row=r, column=1, value="Line Item ($mm)").font = LABEL_FONT
+    ws4.cell(row=r, column=1).fill = GREY_FILL
+    ws4.cell(row=r, column=1).border = BOX
+    for i, y in enumerate(hist_years):
+        c = ws4.cell(row=r, column=2 + i, value=str(y))
+        c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX; c.alignment = Alignment(horizontal="center")
+    r += 1
+    line_items = [
+        ("revenue", "Total Revenue"), ("net_income", "Net Income"), ("ebit", "EBITDA"),
+        ("ocf", "Operating Cash Flow"), ("fcf", "Free Cash Flow"),
+    ]
+    row_ref = {}
+    for key, label in line_items:
+        ws4.cell(row=r, column=1, value=label).font = FORMULA_FONT
+        vals = hist.get(key, [None] * n_years)
+        for i in range(n_years):
+            v = vals[i] if i < len(vals) and vals[i] is not None else 0
+            c = ws4.cell(row=r, column=2 + i, value=round(v / 1_000_000, 2) if v else 0)
+            c.font = INPUT_FONT; c.number_format = NUM_FMT; c.border = BOX
+        row_ref[key] = r
+        r += 1
+    # Net margin (formula)
+    ws4.cell(row=r, column=1, value="Net Margin").font = LABEL_FONT
+    for i in range(n_years):
+        col_l = get_column_letter(2 + i)
+        c = ws4.cell(row=r, column=2 + i, value=f"=IFERROR({col_l}{row_ref['net_income']}/{col_l}{row_ref['revenue']},0)")
+        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
+    margin_row = r
+    r += 1
+    if n_years > 1:
+        ws4.cell(row=r, column=1, value="Revenue YoY Growth").font = LABEL_FONT
+        for i in range(1, n_years):
+            col_l = get_column_letter(2 + i)
+            prev_l = get_column_letter(1 + i)
+            c = ws4.cell(row=r, column=2 + i, value=f"=IFERROR(({col_l}{row_ref['revenue']}-{prev_l}{row_ref['revenue']})/{prev_l}{row_ref['revenue']},0)")
+            c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
+        r += 1
+    r += 1
+
+    r = _section(ws4, r, "Balance Sheet", span=1 + n_years)
+    ws4.cell(row=r, column=1, value="Line Item ($mm)").font = LABEL_FONT
+    ws4.cell(row=r, column=1).fill = GREY_FILL
+    for i, y in enumerate(hist_years):
+        c = ws4.cell(row=r, column=2 + i, value=str(y))
+        c.font = LABEL_FONT; c.fill = GREY_FILL; c.alignment = Alignment(horizontal="center")
+    r += 1
+    bs_items = [
+        ("total_assets", "Total Assets"), ("total_equity", "Total Stockholders Equity"),
+        ("total_liabilities", "Total Liabilities"), ("current_assets", "Current Assets"),
+        ("current_liabilities", "Current Liabilities"),
+    ]
+    bs_row_ref = {}
+    for key, label in bs_items:
+        ws4.cell(row=r, column=1, value=label).font = FORMULA_FONT
+        vals = hist.get(key, [None] * n_years)
+        for i in range(n_years):
+            v = vals[i] if i < len(vals) and vals[i] is not None else 0
+            c = ws4.cell(row=r, column=2 + i, value=round(v / 1_000_000, 2) if v else 0)
+            c.font = INPUT_FONT; c.number_format = NUM_FMT; c.border = BOX
+        bs_row_ref[key] = r
+        r += 1
+    ws4.cell(row=r, column=1, value="Return on Equity (ROE)").font = LABEL_FONT
+    for i in range(n_years):
+        col_l = get_column_letter(2 + i)
+        c = ws4.cell(row=r, column=2 + i,
+                      value=f"=IFERROR({col_l}{row_ref['net_income']}/{col_l}{bs_row_ref['total_equity']},0)")
+        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
+    r += 1
+    ws4.cell(row=r, column=1, value="Return on Assets (ROA)").font = LABEL_FONT
+    for i in range(n_years):
+        col_l = get_column_letter(2 + i)
+        c = ws4.cell(row=r, column=2 + i,
+                      value=f"=IFERROR({col_l}{row_ref['net_income']}/{col_l}{bs_row_ref['total_assets']},0)")
+        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
+    r += 2
+    src_note = ws4.cell(row=r, column=1, value=f"Source: Yahoo Finance financial statements (yfinance), as pulled {today_str}. "
+                                                 f"Figures in $mm; hardcoded (blue) as sourced facts, ratios below are live formulas.")
+    src_note.font = NOTE_FONT
+
+    # ================================================================ COMPS ==
+    ws5 = wb.create_sheet("Comps")
+    ws5.sheet_view.showGridLines = False
+    comps = ctx.get("comps", [])
+    _set_widths(ws5, [34, 22, 14, 14, 16])
+    _page_setup(ws5)
+    _banner(ws5, "Relative Valuation — Peer Comparables", "Source: Yahoo Finance, live pull.", span=5)
+    r = 4
+    r = _section(ws5, r, "Trading Comps", span=5)
+    for i, h in enumerate(["Ticker", "Company", "P/E", "EV/EBITDA", "Net Margin"]):
+        c = ws5.cell(row=r, column=1 + i, value=h); c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX
+    r += 1
+    comp_start = r
+    for row_data in comps:
+        ws5.cell(row=r, column=1, value=row_data.get("ticker", "")).font = INPUT_FONT
+        ws5.cell(row=r, column=2, value=row_data.get("name", "")).font = INPUT_FONT
+        pe_c = ws5.cell(row=r, column=3, value=row_data.get("pe") or None); pe_c.font = INPUT_FONT; pe_c.number_format = MULT_FMT
+        ev_c = ws5.cell(row=r, column=4, value=row_data.get("ev_ebitda") or None); ev_c.font = INPUT_FONT; ev_c.number_format = MULT_FMT
+        nm_c = ws5.cell(row=r, column=5, value=(row_data.get("net_margin") or 0) / 100 if row_data.get("net_margin") else None)
+        nm_c.font = INPUT_FONT; nm_c.number_format = PCT_FMT
+        for cc in range(1, 6):
+            ws5.cell(row=r, column=cc).border = BOX
+        r += 1
+    comp_end = r - 1
+    if comp_end >= comp_start:
+        ws5.cell(row=r, column=2, value="Peer Average").font = LABEL_FONT
+        for col, fmt in [(3, MULT_FMT), (4, MULT_FMT), (5, PCT_FMT)]:
+            col_l = get_column_letter(col)
+            c = ws5.cell(row=r, column=col, value=f"=IFERROR(AVERAGE({col_l}{comp_start}:{col_l}{comp_end}),0)")
+            c.font = FORMULA_FONT; c.number_format = fmt; c.border = BOX
+        r += 1
+        ws5.cell(row=r, column=2, value="Peer Median").font = LABEL_FONT
+        for col, fmt in [(3, MULT_FMT), (4, MULT_FMT), (5, PCT_FMT)]:
+            col_l = get_column_letter(col)
+            c = ws5.cell(row=r, column=col, value=f"=IFERROR(MEDIAN({col_l}{comp_start}:{col_l}{comp_end}),0)")
+            c.font = FORMULA_FONT; c.number_format = fmt; c.border = BOX
+        avg_row = r - 1
+        r += 2
+        ws5.cell(row=r, column=1, value="Implied Price (Peer Avg P/E × EPS)").font = LABEL_FONT
+        eps = ctx.get("eps", 0)
+        ws5["B" + str(r + 1)] = "EPS"
+        ws5["C" + str(r + 1)] = eps
+        ws5["C" + str(r + 1)].font = INPUT_FONT
+        ws5["C" + str(r + 1)].number_format = CUR_FMT
+        c = ws5.cell(row=r, column=2, value=f"=C{avg_row}*C{r+1}")
+        c.font = FORMULA_FONT; c.number_format = CUR_FMT; c.border = BOX
+
+    # ============================================================= HEALTH ==
+    ws6 = wb.create_sheet("Health & Ratios")
+    ws6.sheet_view.showGridLines = False
+    _set_widths(ws6, [30, 16, 4, 40])
+    _page_setup(ws6)
+    _banner(ws6, "Corporate Health — DuPont, Altman Z, Piotroski", span=4)
+    r = 4
+    r = _section(ws6, r, "DuPont ROE Decomposition", span=4)
+    dupont = ctx.get("dupont", {})
+    if dupont.get("valid"):
+        r = _kv(ws6, r, "Net Profit Margin", dupont.get("npm", 0) / 100, fmt=PCT_FMT, font=INPUT_FONT)
+        r = _kv(ws6, r, "Asset Turnover", dupont.get("ato", 0), fmt=MULT_FMT, font=INPUT_FONT)
+        r = _kv(ws6, r, "Equity Multiplier", dupont.get("em", 0), fmt=MULT_FMT, font=INPUT_FONT)
+        dp_row = r
+        ws6.cell(row=r, column=1, value="ROE (NPM × ATO × EM)").font = LABEL_FONT
+        c = ws6.cell(row=r, column=2, value=f"=B{dp_row-3}*B{dp_row-2}*B{dp_row-1}")
+        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX; c.fill = PatternFill("solid", fgColor="D1FAE5")
+        r += 2
+    else:
+        ws6.cell(row=r, column=1, value="Insufficient data for DuPont breakdown.").font = NOTE_FONT
+        r += 2
+
+    r = _section(ws6, r, "Altman Z-Score", span=4)
+    z = ctx.get("z_score")
+    if z is not None:
+        r = _kv(ws6, r, ctx.get("z_model_type", "Altman Z-Score"), z, fmt='0.00', font=INPUT_FONT)
+        r = _kv(ws6, r, "Safe Zone Threshold", ctx.get("z_safe_limit", 0), fmt='0.00', font=INPUT_FONT)
+        r = _kv(ws6, r, "Distress Zone Threshold", ctx.get("z_distress_limit", 0), fmt='0.00', font=INPUT_FONT)
+        r += 1
+    else:
+        ws6.cell(row=r, column=1, value="Altman Z-Score not applicable (financial institution) or insufficient data.").font = NOTE_FONT
+        r += 2
+
+    r = _section(ws6, r, "Piotroski F-Score (Proxy)", span=4)
+    r = _kv(ws6, r, "F-Score (of 4 tracked signals)", ctx.get("f_score", 0), fmt='0', font=INPUT_FONT)
+    r += 1
+
+    r = _section(ws6, r, "ROIC vs. WACC", span=4)
+    roic = ctx.get("roic")
+    if roic is not None:
+        r = _kv(ws6, r, "ROIC", roic, fmt=PCT_FMT, font=INPUT_FONT)
+        r = _kv(ws6, r, "WACC (linked)", f"='{A}'!$B${a_wacc}", fmt=PCT_FMT, font=LINK_FONT)
+        ws6.cell(row=r, column=1, value="Value Creation Spread").font = LABEL_FONT
+        c = ws6.cell(row=r, column=2, value=f"=B{r-2}-B{r-1}")
+        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
+        r += 2
+    else:
+        ws6.cell(row=r, column=1, value="Insufficient data for ROIC.").font = NOTE_FONT
+
+    # ======================================================= PRICE HISTORY ==
+    ws7 = wb.create_sheet("Price History")
+    ws7.sheet_view.showGridLines = False
+    price_df = ctx.get("price_df")
+    _set_widths(ws7, [14, 14, 14, 14, 14])
+    _page_setup(ws7)
+    _banner(ws7, f"Historical Price Action — {ticker}", "Raw daily series with 50 / 200-day moving averages.", span=5)
+    r = 4
+    # Price series grouped together (cols 2-4) so the chart can reference one
+    # contiguous, same-scale block; Volume (very different scale) sits apart in col 5.
+    headers = ["Date", "Close", "SMA 50", "SMA 200", "Volume"]
+    for i, h in enumerate(headers):
+        c = ws7.cell(row=r, column=1 + i, value=h); c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX
+    data_start = r + 1
+    if price_df is not None and not price_df.empty:
+        for _, row_data in price_df.iterrows():
+            r += 1
+            ws7.cell(row=r, column=1, value=row_data["date"].strftime("%Y-%m-%d") if hasattr(row_data["date"], "strftime") else str(row_data["date"])).font = INPUT_FONT
+            ws7.cell(row=r, column=2, value=round(float(row_data["close_price"]), 2)).font = INPUT_FONT
+            ws7.cell(row=r, column=2).number_format = CUR_FMT
+            ws7.cell(row=r, column=3, value=round(float(row_data["sma_50"]), 2) if pd_notna(row_data.get("sma_50")) else None).number_format = CUR_FMT
+            ws7.cell(row=r, column=4, value=round(float(row_data["sma_200"]), 2) if pd_notna(row_data.get("sma_200")) else None).number_format = CUR_FMT
+            ws7.cell(row=r, column=5, value=int(row_data["volume"])).font = INPUT_FONT
+            ws7.cell(row=r, column=5).number_format = NUM_FMT
+        data_end = r
+
+        chart = LineChart()
+        chart.title = f"{ticker} — Price & Moving Averages"
+        chart.style = 2
+        chart.y_axis.title = f"Price ({currency})"
+        chart.x_axis.title = "Date"
+        chart.height = 9
+        chart.width = 22
+        data_ref = Reference(ws7, min_col=2, max_col=4, min_row=4, max_row=data_end)
+        cats_ref = Reference(ws7, min_col=1, min_row=data_start, max_row=data_end)
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats_ref)
+        ws7.add_chart(chart, f"G4")
+    else:
+        ws7.cell(row=r + 1, column=1, value="No price history available.").font = NOTE_FONT
+
+    ws.sheet_view.tabSelected = True
+    wb.active = 0
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def pd_notna(v):
+    try:
+        import math
+        if v is None:
+            return False
+        return not (isinstance(v, float) and math.isnan(v))
+    except Exception:
+        return v is not None
+
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from datetime import datetime
+from fpdf import FPDF
+
+NAVY = (30, 41, 59)
+BLUE = (59, 130, 246)
+GREEN = (16, 185, 129)
+RED = (239, 68, 68)
+GREY = (100, 116, 139)
+LIGHT_GREY = (241, 245, 249)
+WHITE = (255, 255, 255)
+
+
+def _safe(s):
+    return str(s).encode("latin-1", "ignore").decode("latin-1")
+
+
+def _mini_chart(df_market, accent_hex="#3b82f6"):
+    """Render a compact price + SMA sparkline chart to PNG bytes."""
+    fig, ax = plt.subplots(figsize=(7.6, 2.3), dpi=200)
+    ax.plot(df_market["date"], df_market["close_price"], color=accent_hex, linewidth=1.4, label="Close")
+    if "sma_50" in df_market.columns:
+        ax.plot(df_market["date"], df_market["sma_50"], color="#ef4444", linewidth=0.9, label="SMA 50")
+    if "sma_200" in df_market.columns:
+        ax.plot(df_market["date"], df_market["sma_200"], color="#10b981", linewidth=0.9, label="SMA 200")
+    ax.legend(loc="upper left", fontsize=6, frameon=False)
+    ax.tick_params(labelsize=6, colors="#475569")
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    ax.grid(axis="y", linewidth=0.3, alpha=0.4)
+    fig.tight_layout(pad=0.4)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", transparent=True)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+class TearSheet(FPDF):
+    def footer(self):
+        self.set_y(-14)
+        self.set_font("Helvetica", "I", 7)
+        self.set_text_color(*GREY)
+        self.cell(0, 5, "Prepared using Titan Equity Terminal. Independently generated from public market data; "
+                         "not investment advice or a solicitation to buy or sell any security.", align="C")
+        self.set_y(-9)
+        self.cell(0, 5, f"Generated {datetime.now().strftime('%d %b %Y, %H:%M')} | Page {self.page_no()}", align="C")
+
+
+def generate_pdf_report(ctx: dict) -> bytes:
+    """
+    ctx keys used (all optional with fallbacks):
+    ticker, full_name, sector, industry, exchange, curr_sym, currency,
+    current_price, market_cap, beta, pe, high_52, low_52, div_yield, volume,
+    dcf_results (dict scenario->price), graham_number,
+    dupont (dict npm/ato/em/roe/valid), z_score, z_model_type, z_safe_limit,
+    z_distress_limit, f_score, roic, wacc, verdict_note (str, optional),
+    df_market (DataFrame with date, close_price, sma_50, sma_200) or None
+    """
+    curr_sym = ctx.get("curr_sym", "$")
+    pdf_sym = "INR " if curr_sym == "\u20b9" else curr_sym
+    ticker = ctx.get("ticker", "N/A")
+    full_name = _safe(ctx.get("full_name", ticker))
+    sector = _safe(ctx.get("sector", "N/A"))
+    industry = _safe(ctx.get("industry", "N/A"))
+    exchange = _safe(ctx.get("exchange", "N/A"))
+    c_price = ctx.get("current_price", 0) or 0
+    dcf_results = ctx.get("dcf_results", {}) or {}
+    graham = ctx.get("graham_number", 0) or 0
+
+    pdf = TearSheet(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=16)
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, f"INSTITUTIONAL TEAR SHEET: {safe_name} ({ticker})", ln=True, align='C')
-    pdf.set_font("Arial", '', 10)
-    pdf.cell(0, 6, f"Sector: {safe_sector}  |  Currency: {pdf_sym.strip()}", ln=True, align='C')
-    pdf.line(10, 30, 200, 30)
-    pdf.ln(10)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "1. Market Overview & Multiples", ln=True)
-    pdf.set_font("Arial", '', 10)
-    pdf.cell(95, 6, f"Current Trading Price: {pdf_sym}{c_price:.2f}")
-    pdf.cell(95, 6, f"Systematic Risk (Beta): {info.get('beta', 'N/A')}", ln=True)
-    pdf.cell(95, 6, f"Trailing P/E Ratio: {info.get('trailingPE', 'N/A')}x")
-    pdf.cell(95, 6, f"Graham Number Intrinsic Value: {pdf_sym}{graham:.2f}", ln=True)
-    pdf.ln(5)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "2. Intrinsic Valuation (DCF / DDM Scenarios)", ln=True)
-    pdf.set_font("Arial", '', 10)
-    for scenario, price in dcf_results.items():
-        upside = ((price - c_price) / c_price) * 100 if c_price > 0 else 0
-        pdf.cell(0, 6, f"{scenario}: {pdf_sym}{price:.2f} per share (Edge: {upside:+.1f}%)", ln=True)
-    pdf.ln(5)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "3. Corporate Health & DuPont Breakdown", ln=True)
-    pdf.set_font("Arial", '', 10)
-    if dupont['valid']:
-        pdf.cell(95, 6, f"Net Margin: {dupont['npm']:.2f}%")
-        pdf.cell(95, 6, f"Asset Turnover: {dupont['ato']:.2f}x", ln=True)
-        pdf.cell(95, 6, f"Equity Multiplier: {dupont['em']:.2f}x")
-        pdf.cell(95, 6, f"ROE: {dupont['roe']:.2f}%", ln=True)
-    pdf.ln(20)
-    pdf.set_font("Arial", 'I', 8)
-    pdf.cell(0, 6, "Generated via Quantitative Asset Terminal. Not financial advice.", align='C')
-    return pdf.output(dest='S').encode('latin-1')
+    pdf.set_margins(12, 12, 12)
+
+    # -------------------------------------------------------------- header --
+    pdf.set_fill_color(*NAVY)
+    pdf.rect(0, 0, 210, 28, "F")
+    pdf.set_xy(12, 7)
+    pdf.set_text_color(*WHITE)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(140, 8, f"{full_name} ({ticker})", ln=0)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_xy(12, 16)
+    pdf.cell(140, 6, f"{sector}  |  {industry}  |  {exchange}", ln=0)
+
+    # rating badge, top-right
+    base_case = dcf_results.get("Base Case")
+    if base_case and c_price:
+        upside = (base_case - c_price) / c_price
+        if upside > 0.10:
+            badge, bg = "UNDERVALUED", GREEN
+        elif upside < -0.10:
+            badge, bg = "OVERVALUED", RED
+        else:
+            badge, bg = "FAIRLY VALUED", (245, 158, 11)
+    else:
+        badge, bg = "N/A", GREY
+    pdf.set_fill_color(*bg)
+    pdf.rect(155, 8, 43, 12, "F")
+    pdf.set_xy(155, 8)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(*WHITE)
+    pdf.cell(43, 12, badge, align="C")
+
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_y(33)
+
+    # ------------------------------------------------------- snapshot strip --
+    stats = [
+        ("Price", f"{pdf_sym}{c_price:,.2f}"),
+        ("Market Cap", f"{pdf_sym}{(ctx.get('market_cap') or 0)/1e9:,.2f}B"),
+        ("Beta", f"{ctx.get('beta', 1.0):.2f}"),
+        ("P/E (TTM)", f"{ctx.get('pe', 0) or 0:.1f}x" if ctx.get("pe") else "N/A"),
+        ("52W Range", f"{pdf_sym}{ctx.get('low_52', 0):,.0f} - {pdf_sym}{ctx.get('high_52', 0):,.0f}"),
+        ("Div Yield", f"{(ctx.get('div_yield') or 0)*100:.2f}%"),
+    ]
+    col_w = 186 / len(stats)
+    pdf.set_fill_color(*LIGHT_GREY)
+    pdf.rect(12, pdf.get_y(), 186, 16, "F")
+    y0 = pdf.get_y()
+    for i, (label, val) in enumerate(stats):
+        x = 12 + i * col_w
+        pdf.set_xy(x, y0 + 2)
+        pdf.set_font("Helvetica", "", 7)
+        pdf.set_text_color(*GREY)
+        pdf.cell(col_w, 4, label, align="C")
+        pdf.set_xy(x, y0 + 7)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(*NAVY)
+        pdf.cell(col_w, 6, _safe(val), align="C")
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_y(y0 + 20)
+
+    # ------------------------------------------------------------ chart -----
+    df_market = ctx.get("df_market")
+    if df_market is not None and not df_market.empty:
+        try:
+            chart_buf = _mini_chart(df_market)
+            pdf.image(chart_buf, x=12, y=pdf.get_y(), w=186)
+            pdf.set_y(pdf.get_y() + 58)
+        except Exception:
+            pass
+
+    # ------------------------------------------------- section: valuation ---
+    def section_header(title):
+        pdf.set_fill_color(*BLUE)
+        pdf.set_text_color(*WHITE)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 7, f"  {title}", ln=True, fill=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(1)
+
+    section_header("Intrinsic Valuation (DCF)")
+    pdf.set_font("Helvetica", "", 9)
+    if dcf_results:
+        col_labels = ["Scenario", "Implied Price", "vs. Current", "Upside / (Downside)"]
+        widths = [46, 46, 46, 48]
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_fill_color(*LIGHT_GREY)
+        for w, lab in zip(widths, col_labels):
+            pdf.cell(w, 6, lab, border=0, fill=True)
+        pdf.ln()
+        pdf.set_font("Helvetica", "", 9)
+        for scenario, price in dcf_results.items():
+            upside = ((price - c_price) / c_price) * 100 if c_price > 0 else 0
+            pdf.cell(widths[0], 6, _safe(scenario))
+            pdf.cell(widths[1], 6, f"{pdf_sym}{price:,.2f}")
+            pdf.cell(widths[2], 6, f"{pdf_sym}{c_price:,.2f}")
+            if upside >= 0:
+                pdf.set_text_color(*GREEN)
+            else:
+                pdf.set_text_color(*RED)
+            pdf.cell(widths[3], 6, f"{upside:+.1f}%")
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln()
+    else:
+        pdf.multi_cell(0, 6, "DCF not applicable for this asset class (see methodology note).")
+    pdf.ln(1)
+    pdf.set_font("Helvetica", "", 8.5)
+    pdf.set_text_color(*GREY)
+    pdf.cell(95, 5, f"Graham Number (defensive value): {pdf_sym}{graham:,.2f}")
+    wacc = ctx.get("wacc")
+    if wacc is not None:
+        pdf.cell(95, 5, f"Discount Rate (WACC): {wacc*100:.2f}%")
+    pdf.ln(7)
+    pdf.set_text_color(0, 0, 0)
+
+    # --------------------------------------------------- section: health ----
+    section_header("Financial Health & Quality Signals")
+    pdf.set_font("Helvetica", "", 9)
+    dupont = ctx.get("dupont", {}) or {}
+    left_x = pdf.get_x()
+    y_start = pdf.get_y()
+    col_w2 = 93
+
+    def block(x, y, lines):
+        pdf.set_xy(x, y)
+        for lab, val in lines:
+            pdf.set_x(x)
+            pdf.set_font("Helvetica", "", 8.5)
+            pdf.set_text_color(*GREY)
+            pdf.cell(col_w2 * 0.55, 5.5, lab)
+            pdf.set_font("Helvetica", "B", 8.5)
+            pdf.set_text_color(*NAVY)
+            pdf.cell(col_w2 * 0.45, 5.5, val, align="R")
+            pdf.ln(5.5)
+
+    dupont_lines = []
+    if dupont.get("valid"):
+        dupont_lines = [
+            ("Net Profit Margin", f"{dupont['npm']:.2f}%"),
+            ("Asset Turnover", f"{dupont['ato']:.2f}x"),
+            ("Equity Multiplier", f"{dupont['em']:.2f}x"),
+            ("DuPont ROE", f"{dupont['roe']:.2f}%"),
+        ]
+    else:
+        dupont_lines = [("DuPont breakdown", "Insufficient data")]
+    block(left_x, y_start, dupont_lines)
+
+    right_lines = []
+    z = ctx.get("z_score")
+    if z is not None:
+        right_lines.append((_safe(ctx.get("z_model_type", "Altman Z-Score")), f"{z:.2f}"))
+    f_score = ctx.get("f_score")
+    if f_score is not None:
+        right_lines.append(("Piotroski F-Score (proxy)", f"{f_score}/4"))
+    roic = ctx.get("roic")
+    if roic is not None and wacc is not None:
+        spread = (roic - wacc) * 100
+        right_lines.append(("ROIC - WACC Spread", f"{spread:+.2f}%"))
+    if not right_lines:
+        right_lines = [("Health signals", "Insufficient data")]
+    block(left_x + 95, y_start, right_lines)
+
+    pdf.set_y(y_start + max(len(dupont_lines), len(right_lines)) * 5.5 + 3)
+
+    # Plain-English read line
+    read_bits = []
+    if z is not None:
+        safe_lim = ctx.get("z_safe_limit")
+        dist_lim = ctx.get("z_distress_limit")
+        if safe_lim and z >= safe_lim:
+            read_bits.append("Z-Score places the company in the safe zone for structural insolvency risk.")
+        elif dist_lim and z < dist_lim:
+            read_bits.append("Z-Score flags the company in the distress zone - elevated insolvency risk.")
+        elif safe_lim and dist_lim:
+            read_bits.append("Z-Score sits in the grey zone - monitor leverage trends.")
+    if roic is not None and wacc is not None:
+        if roic > wacc:
+            read_bits.append("ROIC exceeds WACC - the business is creating economic value.")
+        else:
+            read_bits.append("ROIC trails WACC - the business is currently a value destroyer on this metric.")
+    if read_bits:
+        pdf.set_font("Helvetica", "I", 8.5)
+        pdf.set_text_color(*GREY)
+        pdf.multi_cell(0, 5, "  " + "  ".join(read_bits))
+        pdf.set_text_color(0, 0, 0)
+    pdf.ln(2)
+
+    # --------------------------------------------------- methodology note --
+    section_header("Methodology & Disclosures")
+    pdf.set_font("Helvetica", "", 7.5)
+    pdf.set_text_color(*GREY)
+    pdf.multi_cell(
+        0, 4.2,
+        "Valuation uses a 5-year discounted free cash flow model (Bear/Base/Bull growth paths) with a Gordon "
+        "Growth terminal value, discounted at a CAPM-derived WACC. Financial statement data is sourced live from "
+        "Yahoo Finance and may lag official filings; Altman Z-Score and Piotroski F-Score are computed from "
+        "available fields and are directional proxies, not audited figures. This document is generated "
+        "programmatically for research and educational purposes and does not constitute investment advice, a "
+        "research report under applicable securities regulations, or a recommendation to buy or sell any security. "
+        "All figures as of the date shown; markets change and this snapshot will not reflect subsequent moves."
+    )
+    pdf.set_text_color(0, 0, 0)
+
+    return bytes(pdf.output(dest="S"))
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_ai_thesis(ticker, full_name, metrics_summary):
     try:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-        prompt = f"""You are an expert equity research analyst. Based on the following quantitative metrics for {full_name} ({ticker}), write a concise investment thesis (~200 words).
+        prompt = f"""You are an institutional equity research analyst specializing in quantitative corporate finance. 
+Analyze these metrics for {full_name} ({ticker}):
+{metrics_summary}
 
-Structure your response exactly as follows:
-1. **Verdict**: (Buy / Hold / Sell lean)
-2. **Valuation Case**: (Brief analysis of the DCF, WACC, and Price)
-3. **Key Risk**: (Highlight the biggest vulnerability from the data, e.g., low Z-score, bad ROIC, or overbought RSI)
-4. **One-Line Rationale**: (A single punchy closing sentence)
+You must return a response strictly in valid JSON format. Do not include markdown code blocks or wrappers outside the JSON.
+The JSON must follow this schema exactly:
+{{
+    "verdict": "BUY", "HOLD", or "SELL",
+    "target_rationale": "One sentence punchy summary.",
+    "variant_perception": "What unique insight does the data reveal that the broader market might be missing?",
+    "valuation_case": "Analysis of DCF, WACC, and intrinsic margin of safety.",
+    "core_risk_factor": "The absolute biggest structural or quantitative vulnerability found in the data.",
+    "quantitative_grounding": ["List 2-3 key metrics and their exact values that proved your point"]
+}}"""
 
-Metrics:
-{metrics_summary}"""
         response = client.models.generate_content(
             model="gemini-3.5-flash",
-            contents=prompt
+            contents=prompt,
         )
-        return response.text
+        
+        # Strip accidental markdown formatting and parse JSON
+        clean_text = response.text.strip().lstrip("```json").rstrip("```")
+        return json.loads(clean_text)
     except Exception as e:
-        return f"ERROR: {str(e)}"
+        return None
 
 # ==========================================
 # 3. SIDEBAR: MACRO CONTROL DECK
@@ -380,16 +1251,94 @@ if st.session_state.app_running and selected_ticker:
         if ni and ta and te and rev and ta > 0 and te > 0 and rev > 0:
             dupont_data = {'valid': True, 'npm': (ni/rev)*100, 'ato': rev/ta, 'em': ta/te, 'roe': (ni/rev)*(rev/ta)*(ta/te)*100}
 
+        # --- Health signals (ROIC, Altman Z-Score, Piotroski F-Score) --------
+        # Computed once here (rather than deep inside their respective tabs)
+        # so both the Health tab below AND the PDF / Excel exports in the
+        # header row can share the same numbers without duplicating logic.
+        ebit_h = deep_metrics.get('ebit')
+        tl_h = deep_metrics.get('total_liabilities')
+        mkt_cap_h = info.get('marketCap')
+        ca_h = deep_metrics.get('current_assets')
+        cl_h = deep_metrics.get('current_liabilities')
+
+        roic, roic_wacc_spread = None, None
+        if ebit_h and ta:
+            nopat_h = ebit_h * (1 - 0.21)
+            invested_capital_h = ta - ((tl_h or 0) * 0.4)
+            if invested_capital_h > 0:
+                roic = nopat_h / invested_capital_h
+                roic_wacc_spread = roic - calculated_wacc
+
+        z_score, model_type, z_safe_limit, z_distress_limit = None, None, None, None
+        if not is_financial:
+            working_capital_h = (ca_h - cl_h) if ca_h and cl_h else 0
+            if ta and rev and tl_h and mkt_cap_h and ebit_h and ta > 0 and tl_h > 0:
+                x1 = working_capital_h / ta
+                x2 = te / ta
+                x3 = ebit_h / ta
+                x4 = mkt_cap_h / tl_h
+                if is_manufacturing:
+                    x5 = rev / ta
+                    z_score = (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (1.0 * x5)
+                    model_type = "Classic Manufacturing Z-Score"
+                    z_safe_limit, z_distress_limit = 3.0, 1.8
+                else:
+                    z_score = (6.56 * x1) + (3.26 * x2) + (6.72 * x3) + (1.05 * x4)
+                    model_type = "Emerging Service & Tech Z''-Score"
+                    z_safe_limit, z_distress_limit = 2.6, 1.1
+
+        f_score = 0
+        if ni and ni > 0: f_score += 1
+        if deep_metrics.get('operating_cashflow') and deep_metrics.get('operating_cashflow') > 0: f_score += 1
+        if deep_metrics.get('operating_cashflow') and ni and deep_metrics.get('operating_cashflow') > ni: f_score += 1
+        if info.get('returnOnAssets') and info.get('returnOnAssets') > 0: f_score += 1
+
+        hist_years, hist_financials = extract_multi_year_financials(raw_ticker)
+
         col_head1, col_head2 = st.columns([3, 1])
         with col_head1:
             st.header(f"📊 {full_name} ({selected_ticker})")
             st.markdown(f"**Sector:** {info.get('sector', 'N/A') or 'N/A'} | **Industry:** {info.get('industry', 'N/A') or 'N/A'} | **Exchange:** {info.get('exchange', 'N/A') or 'N/A'}")
         with col_head2:
-            st.write("") 
-            pdf_bytes = generate_pdf_report(selected_ticker, full_name, info.get('sector', 'N/A'), curr_sym, current_price, info, pdf_dcf, dupont_data, graham_number)
+            st.write("")
+            pdf_ctx = {
+                "ticker": selected_ticker, "full_name": full_name, "sector": info.get('sector', 'N/A'),
+                "industry": info.get('industry', 'N/A'), "exchange": info.get('exchange', 'N/A'),
+                "curr_sym": curr_sym, "currency": currency, "current_price": current_price,
+                "market_cap": info.get('marketCap'), "beta": beta_raw, "pe": info.get('trailingPE'),
+                "high_52": info.get('fiftyTwoWeekHigh'), "low_52": info.get('fiftyTwoWeekLow'),
+                "div_yield": dividend_yield, "dcf_results": pdf_dcf, "graham_number": graham_number,
+                "dupont": dupont_data, "z_score": z_score, "z_model_type": model_type,
+                "z_safe_limit": z_safe_limit, "z_distress_limit": z_distress_limit,
+                "f_score": f_score, "roic": roic, "wacc": calculated_wacc, "df_market": df_market,
+            }
+            pdf_bytes = generate_pdf_report(pdf_ctx)
             st.download_button("📥 PDF Tear Sheet", data=pdf_bytes, file_name=f"{selected_ticker}_Tear_Sheet.pdf", mime="application/pdf", use_container_width=True)
-            csv_data = df_market.to_csv(index=False).encode('utf-8')
-            st.download_button(label="📥 Raw SQL Data (CSV)", data=csv_data, file_name=f"{selected_ticker}_historical.csv", mime='text/csv', use_container_width=True)
+
+            excel_ctx = {
+                "ticker": selected_ticker, "full_name": full_name, "sector": info.get('sector', 'N/A'),
+                "industry": info.get('industry', 'N/A'), "exchange": info.get('exchange', 'N/A'),
+                "currency": currency, "curr_sym": curr_sym, "current_price": current_price,
+                "market_cap": info.get('marketCap'), "beta": beta_raw, "pe": info.get('trailingPE'),
+                "div_yield": dividend_yield, "high_52": info.get('fiftyTwoWeekHigh'),
+                "low_52": info.get('fiftyTwoWeekLow'), "shares_out": shares,
+                "rf": current_rf, "erp": global_erp, "cost_of_debt": current_rf + 0.02,
+                "tax_rate": tax_rate_proxy, "total_debt": total_debt or 0,
+                "fcf_base": fcf_base, "wacc": calculated_wacc, "cost_of_equity": cost_of_equity,
+                "growth_bear": 0.04, "growth_base": 0.08, "growth_bull": 0.14, "terminal_growth": 0.04,
+                "graham_number": graham_number, "dividend_rate": dividend_rate,
+                "hist_years": hist_years if hist_years else ["Latest"],
+                "hist": hist_financials if hist_years else {k: [deep_metrics.get(k)] for k in
+                    ['revenue', 'net_income', 'ebit', 'ocf', 'fcf', 'total_assets', 'total_equity',
+                     'total_liabilities', 'current_assets', 'current_liabilities']},
+                "dupont": dupont_data, "z_score": z_score, "z_model_type": model_type,
+                "z_safe_limit": z_safe_limit, "z_distress_limit": z_distress_limit,
+                "f_score": f_score, "roic": roic, "eps": eps,
+                "comps": [], "price_df": df_market,
+            }
+            excel_bytes = generate_excel_model(excel_ctx)
+            st.download_button(label="📥 Financial Model (XLSX)", data=excel_bytes, file_name=f"{selected_ticker}_Financial_Model.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
@@ -1024,12 +1973,12 @@ if st.session_state.app_running and selected_ticker:
                 except: st.warning("Macro data currently unavailable.")
 
         with tab_ai:
-            st.subheader(f"🧠 AI Investment Thesis ({selected_ticker})")
-            st.markdown("Synthesize deterministic quantitative models into an institutional narrative.")
+            st.subheader(f"🧠 Institutional AI Synthesis ({selected_ticker})")
+            st.markdown("Synthesize deterministic quantitative models into a structured narrative.")
             
-            if st.button("Generate Thesis", use_container_width=True):
+            if st.button("Run Quantitative Synthesis", use_container_width=True):
                 v_price = f"{curr_sym}{current_price:.2f}"
-                v_dcf = f"{curr_sym}{ui_dcf_results.get('Base Case', 0):.2f}" if 'ui_dcf_results' in locals() else "N/A (Financial / Alternative Model)"
+                v_dcf = f"{curr_sym}{ui_dcf_results.get('Base Case', 0):.2f}" if 'ui_dcf_results' in locals() else "N/A"
                 v_wacc = f"{calculated_wacc*100:.2f}%" if 'calculated_wacc' in locals() else "N/A"
                 v_zscore = f"{z_score:.2f} ({model_type})" if 'z_score' in locals() and 'model_type' in locals() else "N/A"
                 v_fscore = f"{f_score}/4" if 'f_score' in locals() else "N/A"
@@ -1046,14 +1995,30 @@ if st.session_state.app_running and selected_ticker:
                 - RSI (14-Day): {v_rsi}
                 """
                 
-                with st.spinner("Synthesizing quantitative data via Gemini-3.5-Flash..."):
-                    thesis_result = generate_ai_thesis(selected_ticker, full_name, metrics_summary)
+                with st.spinner("Executing multi-variable semantic analysis via Gemini..."):
+                    thesis_data = generate_ai_thesis(selected_ticker, full_name, metrics_summary)
                     
-                    if thesis_result.startswith("ERROR:"):
-                        st.warning(f"Engine failed to generate thesis. {thesis_result}")
+                    if thesis_data and isinstance(thesis_data, dict):
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            v_color = "green" if thesis_data.get('verdict') == "BUY" else ("red" if thesis_data.get('verdict') == "SELL" else "orange")
+                            st.markdown(f"### Verdict: :{v_color}[{thesis_data.get('verdict', 'N/A')}]")
+                        with col2:
+                            st.markdown(f"**Rationale:** *{thesis_data.get('target_rationale', 'N/A')}*")
+                        
+                        st.divider()
+                        
+                        left_flow, right_flow = st.columns(2)
+                        with left_flow:
+                            st.markdown("### 📊 Valuation & Variant Perception")
+                            st.write(thesis_data.get('valuation_case', 'N/A'))
+                            st.info(f"**Variant Perception:** {thesis_data.get('variant_perception', 'N/A')}")
+                            
+                        with right_flow:
+                            st.markdown("### ⚠️ Risk Assessment & Data Grounding")
+                            st.error(f"**Primary Structural Risk:** {thesis_data.get('core_risk_factor', 'N/A')}")
+                            st.markdown("**Core Data Pillars Used:**")
+                            for item in thesis_data.get('quantitative_grounding', []):
+                                st.markdown(f"- `{item}`")
                     else:
-                        st.success("Analysis Complete.")
-                        st.markdown(thesis_result)
-
-    else:
-        st.error("🚨 Market entity not found.")
+                        st.warning("Engine failed to parse structured thesis. Please try again.")
