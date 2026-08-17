@@ -1093,30 +1093,26 @@ def generate_pdf_report(ctx: dict) -> bytes:
 def generate_ai_thesis(ticker, full_name, metrics_summary):
     try:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-        prompt = f"""You are a senior institutional equity research analyst.
-Conduct a rigorous valuation and fundamental assessment for {full_name} ({ticker}) using the provided quantitative dataset:
+        prompt = f"""You are a Lead Portfolio Manager at an elite institutional fund using a GARP (Growth at a Reasonable Price) framework.
+Analyze these metrics for {full_name} ({ticker}):
 
 {metrics_summary}
 
 Analytical Directives:
-1. Balance intrinsic cash-flow DCF targets against trading multiples (P/E, EV/EBITDA), return on capital (ROIC vs WACC), and balance sheet safety (Altman Z, Piotroski F).
-2. Do not issue a default 'SELL' solely based on DCF sensitivity if ROIC spread, moat, and market multiples reflect strong capital allocation and reasonable market pricing.
-3. Issue a 'BUY' if ROIC exceeds WACC with robust solvency and reasonable growth runway. Issue 'HOLD' if fairly priced or mixed signals. Issue 'SELL' if structural deterioration, negative ROIC spread, or severe insolvency risks exist.
+1. DO NOT default to a 'SELL' just because the DCF value is lower than the current price. Great companies (wide moats, high ROIC, monopolies) deserve to trade at premium valuations.
+2. Issue a 'BUY' if the company has a strong Piotroski F-Score (6+), a positive ROIC vs WACC spread, and is a dominant market player—even if the DCF implies a slight premium. 
+3. Issue a 'HOLD' if the stock is highly overvalued but the underlying business is exceptional, or if it is fairly priced with average fundamentals.
+4. Issue a 'SELL' ONLY if the underlying business is destroying capital (negative ROIC spread, poor F-Score, severe structural risks) AND it is overvalued.
 
 Return STRICT, valid JSON adhering to this schema:
 {{
-    "verdict": "BUY | HOLD | SELL",
+    "verdict": "BUY", "HOLD", or "SELL",
     "target_rationale": "One concise, data-grounded sentence summarizing the core investment stance.",
     "variant_perception": "Key operational or market dynamic that the consensus narrative is mispricing.",
     "valuation_case": "Concise synthesis of intrinsic DCF scenario targets vs current market trading price and WACC.",
     "core_risk_factor": "The single most critical structural, financial, or competitive risk identified in the data.",
-    "quantitative_grounding": [
-        "Metric 1 with exact numerical comparison",
-        "Metric 2 with exact numerical comparison",
-        "Metric 3 with exact numerical comparison"
-    ]
+    "quantitative_grounding": ["List 2-3 specific metrics that proved your point"]
 }}"""
-
         response = client.models.generate_content(
             model="gemini-3.5-flash",
             contents=prompt,
