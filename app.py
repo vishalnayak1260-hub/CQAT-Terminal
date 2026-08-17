@@ -1975,7 +1975,6 @@ if st.session_state.app_running and selected_ticker:
                 except: st.warning("Macro data currently unavailable.")
 
         with tab_ai:
-            with tab_ai:
             st.subheader(f"🧠 Institutional AI Synthesis ({selected_ticker})")
             st.markdown("Synthesize deterministic quantitative models into a structured narrative.")
             
