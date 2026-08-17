@@ -1112,9 +1112,17 @@ The JSON must follow this schema exactly:
             contents=prompt,
         )
         
-        # Strip accidental markdown formatting and parse JSON
-        clean_text = response.text.strip().lstrip("```json").rstrip("```")
-        return json.loads(clean_text)
+        # Bulletproof JSON extraction: find the actual JSON boundaries
+        text = response.text
+        start = text.find('{')
+        end = text.rfind('}')
+        
+        if start != -1 and end != -1:
+            clean_text = text[start:end+1]
+            return json.loads(clean_text)
+        else:
+            return None
+            
     except Exception as e:
         return None
 
@@ -1977,12 +1985,13 @@ if st.session_state.app_running and selected_ticker:
             st.markdown("Synthesize deterministic quantitative models into a structured narrative.")
             
             if st.button("Run Quantitative Synthesis", use_container_width=True):
-                v_price = f"{curr_sym}{current_price:.2f}"
-                v_dcf = f"{curr_sym}{ui_dcf_results.get('Base Case', 0):.2f}" if 'ui_dcf_results' in locals() else "N/A"
-                v_wacc = f"{calculated_wacc*100:.2f}%" if 'calculated_wacc' in locals() else "N/A"
-                v_zscore = f"{z_score:.2f} ({model_type})" if 'z_score' in locals() and 'model_type' in locals() else "N/A"
-                v_fscore = f"{f_score}/4" if 'f_score' in locals() else "N/A"
-                v_roic = f"{roic_wacc_spread*100:.2f}%" if 'roic_wacc_spread' in locals() else "N/A"
+                # Bulletproof Variable Formatting (Fixes the TypeError)
+                v_price = f"{curr_sym}{current_price:.2f}" if current_price is not None else "N/A"
+                v_dcf = f"{curr_sym}{ui_dcf_results.get('Base Case', 0):.2f}" if 'ui_dcf_results' in locals() and ui_dcf_results else "N/A"
+                v_wacc = f"{calculated_wacc*100:.2f}%" if calculated_wacc is not None else "N/A"
+                v_zscore = f"{z_score:.2f} ({model_type})" if z_score is not None else "N/A"
+                v_fscore = f"{f_score}/4" if f_score is not None else "N/A"
+                v_roic = f"{roic_wacc_spread*100:.2f}%" if roic_wacc_spread is not None else "N/A"
                 v_rsi = f"{tech_df['RSI'].iloc[-1]:.2f}" if 'tech_df' in locals() and not tech_df.empty and 'RSI' in tech_df.columns else "N/A"
 
                 metrics_summary = f"""
