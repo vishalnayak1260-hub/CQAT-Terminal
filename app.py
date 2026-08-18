@@ -1089,11 +1089,9 @@ def generate_pdf_report(ctx: dict) -> bytes:
     return pdf.output(dest="S").encode("latin-1")
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def generate_ai_thesis(ticker, full_name, metrics_summary):
-    try:
-        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-        prompt = f"""You are a Lead Portfolio Manager at an elite institutional fund using a GARP (Growth at a Reasonable Price) framework.
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    prompt = f"""You are a Lead Portfolio Manager at an elite institutional fund using a GARP (Growth at a Reasonable Price) framework.
 Analyze these metrics for {full_name} ({ticker}):
 
 {metrics_summary}
@@ -1113,15 +1111,56 @@ Return STRICT, valid JSON adhering to this schema:
     "core_risk_factor": "The single most critical structural, financial, or competitive risk identified in the data.",
     "quantitative_grounding": ["List 2-3 specific metrics that proved your point"]
 }}"""
+    try:
         response = client.models.generate_content(
             model="gemini-3.5-flash",
             contents=prompt,
             config={"response_mime_type": "application/json"}
         )
-        
-        return json.loads(response.text)
     except Exception as e:
-        return f"ERROR: {str(e)}"
+        # Surface the raw SDK/API error (bad key, quota exhausted, network, etc.)
+        raise RuntimeError(f"Gemini API call failed: {e}") from e
+
+    # Gemini can return a response with no usable text if generation was cut
+    # short (safety filters, recitation, max tokens) before any content was
+    # produced. Calling .text in that case raises an opaque SDK error, so we
+    # check finish_reason first and surface a clear, specific message.
+    candidates = getattr(response, "candidates", None)
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidates — the prompt may have been blocked.")
+    finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
+    if finish_reason and "STOP" not in finish_reason.upper():
+        raise RuntimeError(f"Gemini stopped generation early (finish_reason={finish_reason}). "
+                            f"Often a safety filter or max-output-tokens cutoff — try again.")
+
+    raw_text = (response.text or "").strip()
+    if not raw_text:
+        raise RuntimeError("Gemini returned an empty response body.")
+
+    # response_mime_type=json should prevent markdown fencing, but strip it
+    # defensively in case the model wraps the JSON in ```json ... ``` anyway.
+    cleaned = raw_text
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").strip()
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Gemini response was not valid JSON ({e}). Raw start: {cleaned[:120]!r}") from e
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def generate_ai_thesis_cached(ticker, full_name, metrics_summary):
+    """Thin cached wrapper. Kept separate from generate_ai_thesis so that a
+    RAISED exception (bad key, quota, transient network blip, safety block)
+    is NEVER cached by st.cache_data — only a genuine successful dict result
+    is. Previously, errors were caught inside the cached function and
+    returned as a normal string, which st.cache_data happily cached for 30
+    minutes — so retrying after a transient failure just replayed the same
+    stale error instead of actually calling the API again."""
+    return generate_ai_thesis(ticker, full_name, metrics_summary)
 
 # ==========================================
 # 3. SIDEBAR: MACRO CONTROL DECK
