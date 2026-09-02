@@ -2147,8 +2147,11 @@ if st.session_state.app_running and selected_ticker:
                 """
                 
                 with st.spinner("Executing multi-variable semantic analysis via Gemini..."):
-                    thesis_data = generate_ai_thesis(selected_ticker, full_name, metrics_summary)
-                    
+                    try:
+                        thesis_data = generate_ai_thesis(selected_ticker, full_name, metrics_summary)
+                    except RuntimeError as e:
+                        thesis_data = f"ERROR: {e}"
+
                     if isinstance(thesis_data, dict):
                         if "ai_thesis_store" not in st.session_state:
                             st.session_state.ai_thesis_store = {}
@@ -2172,10 +2175,6 @@ if st.session_state.app_running and selected_ticker:
         # PDF TEAR SHEET RENDER (deferred — see pdf_slot note above)
         # =========================================================
         cached_thesis = st.session_state.ai_thesis_store.get(selected_ticker)
-        with st.expander("🔧 Debug: PDF thesis linkage (safe to remove later)", expanded=False):
-            st.write("Ticker used as lookup key:", repr(selected_ticker))
-            st.write("Keys currently cached:", list(st.session_state.ai_thesis_store.keys()))
-            st.write("Thesis found for this ticker:", cached_thesis is not None)
         pdf_ctx = {
             "ticker": selected_ticker, "full_name": full_name, "sector": info.get('sector', 'N/A'),
             "industry": info.get('industry', 'N/A'), "exchange": info.get('exchange', 'N/A'),
