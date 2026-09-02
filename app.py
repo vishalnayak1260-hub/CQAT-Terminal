@@ -866,7 +866,10 @@ def generate_pdf_report(ctx: dict) -> bytes:
     current_price, market_cap, beta, pe, high_52, low_52, div_yield, volume,
     dcf_results (dict scenario->price), graham_number,
     dupont (dict npm/ato/em/roe/valid), z_score, z_model_type, z_safe_limit,
-    z_distress_limit, f_score, roic, wacc, verdict_note (str, optional),
+    z_distress_limit, f_score, roic, wacc,
+    ai_thesis (dict, optional — output of generate_ai_thesis: verdict,
+    target_rationale, variant_perception, valuation_case, core_risk_factor,
+    quantitative_grounding. Omitted section if not supplied),
     df_market (DataFrame with date, close_price, sma_50, sma_200) or None
     """
     curr_sym = ctx.get("curr_sym", "$")
@@ -998,6 +1001,66 @@ def generate_pdf_report(ctx: dict) -> bytes:
     pdf.ln(7)
     pdf.set_text_color(0, 0, 0)
 
+    # ------------------------------------------------- section: AI thesis ---
+    thesis = ctx.get("ai_thesis") or {}
+    if thesis:
+        section_header("AI Investment Thesis (GARP Synthesis)")
+        pdf.set_font("Helvetica", "B", 10)
+        verdict = _safe(thesis.get("verdict", "N/A"))
+        v_color = GREEN if verdict == "BUY" else (RED if verdict == "SELL" else (245, 158, 11))
+        pdf.set_text_color(*v_color)
+        pdf.cell(0, 6, f"Verdict: {verdict}", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 5, _safe(thesis.get("target_rationale", "N/A")))
+        pdf.ln(1)
+
+        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.set_text_color(*GREY)
+        pdf.cell(0, 5, "Variant Perception", ln=True)
+        pdf.set_font("Helvetica", "", 8.5)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 4.8, _safe(thesis.get("variant_perception", "N/A")))
+        pdf.ln(0.5)
+
+        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.set_text_color(*GREY)
+        pdf.cell(0, 5, "Valuation Case", ln=True)
+        pdf.set_font("Helvetica", "", 8.5)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 4.8, _safe(thesis.get("valuation_case", "N/A")))
+        pdf.ln(0.5)
+
+        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.set_text_color(*RED)
+        pdf.cell(0, 5, "Core Risk Factor", ln=True)
+        pdf.set_font("Helvetica", "", 8.5)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 4.8, _safe(thesis.get("core_risk_factor", "N/A")))
+        pdf.ln(0.5)
+
+        grounding = thesis.get("quantitative_grounding") or []
+        if grounding:
+            pdf.set_font("Helvetica", "B", 8.5)
+            pdf.set_text_color(*GREY)
+            pdf.cell(0, 5, "Quantitative Grounding", ln=True)
+            pdf.set_font("Helvetica", "", 8.5)
+            pdf.set_text_color(0, 0, 0)
+            for item in grounding:
+                # multi_cell(w=0, ...) in this fpdf2 build leaves the cursor
+                # at the RIGHT margin instead of resetting to the left after
+                # it finishes (unlike cell(w=0, ln=True), which does reset).
+                # Without this explicit reset, the 2nd+ bullet has ~0mm of
+                # width left to render into and fpdf raises
+                # "Not enough horizontal space to render a single character".
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(0, 4.8, f"- {_safe(item)}")
+        pdf.ln(2)
+
     # --------------------------------------------------- section: health ----
     section_header("Financial Health & Quality Signals")
     pdf.set_font("Helvetica", "", 9)
@@ -1098,7 +1161,7 @@ Analyze these metrics for {full_name} ({ticker}):
 
 Analytical Directives:
 1. DO NOT default to a 'SELL' just because the DCF value is lower than the current price. Great companies (wide moats, high ROIC, monopolies) deserve to trade at premium valuations.
-2. Issue a 'BUY' if the company has a strong Piotroski F-Score (6+), a positive ROIC vs WACC spread, and is a dominant market player—even if the DCF implies a slight premium. 
+2. Issue a 'BUY' if the company has a strong Piotroski F-Score proxy (3+ out of the 4 tracked signals: positive net income, positive OCF, OCF exceeding net income, positive ROA), a positive ROIC vs WACC spread, and is a dominant market player—even if the DCF implies a slight premium. 
 3. Issue a 'HOLD' if the stock is highly overvalued but the underlying business is exceptional, or if it is fairly priced with average fundamentals.
 4. Issue a 'SELL' ONLY if the underlying business is destroying capital (negative ROIC spread, poor F-Score, severe structural risks) AND it is overvalued.
 
@@ -1368,19 +1431,17 @@ if st.session_state.app_running and selected_ticker:
             st.markdown(f"**Sector:** {info.get('sector', 'N/A') or 'N/A'} | **Industry:** {info.get('industry', 'N/A') or 'N/A'} | **Exchange:** {info.get('exchange', 'N/A') or 'N/A'}")
         with col_head2:
             st.write("")
-            pdf_ctx = {
-                "ticker": selected_ticker, "full_name": full_name, "sector": info.get('sector', 'N/A'),
-                "industry": info.get('industry', 'N/A'), "exchange": info.get('exchange', 'N/A'),
-                "curr_sym": curr_sym, "currency": currency, "current_price": current_price,
-                "market_cap": info.get('marketCap'), "beta": beta_raw, "pe": info.get('trailingPE'),
-                "high_52": info.get('fiftyTwoWeekHigh'), "low_52": info.get('fiftyTwoWeekLow'),
-                "div_yield": dividend_yield, "dcf_results": pdf_dcf, "graham_number": graham_number,
-                "dupont": dupont_data, "z_score": z_score, "z_model_type": model_type,
-                "z_safe_limit": z_safe_limit, "z_distress_limit": z_distress_limit,
-                "f_score": f_score, "roic": roic, "wacc": calculated_wacc, "df_market": df_market,
-            }
-            pdf_bytes = generate_pdf_report(pdf_ctx)
-            st.download_button("📥 PDF Tear Sheet", data=pdf_bytes, file_name=f"{selected_ticker}_Tear_Sheet.pdf", mime="application/pdf", use_container_width=True)
+            if "ai_thesis_store" not in st.session_state:
+                st.session_state.ai_thesis_store = {}
+            # Reserved here (next to the header) so the button stays visually
+            # up top, but actually rendered AFTER the tabs below — see the
+            # "PDF TEAR SHEET RENDER" block at the end of the script. Every
+            # `with tab_x:` block still executes on each script run
+            # regardless of which tab is visibly selected, so by the time we
+            # reach that block, an AI Synthesis click from THIS SAME run has
+            # already landed in session_state and gets picked up immediately
+            # — no extra rerun/click needed.
+            pdf_slot = st.container()
 
             excel_ctx = {
                 "ticker": selected_ticker, "full_name": full_name, "sector": info.get('sector', 'N/A'),
@@ -2042,7 +2103,30 @@ if st.session_state.app_running and selected_ticker:
         with tab_ai:
             st.subheader(f"🧠 Institutional AI Synthesis ({selected_ticker})")
             st.markdown("Synthesize deterministic quantitative models into a structured narrative.")
-            
+
+            def _render_thesis_display(thesis_data):
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    v_color = "green" if thesis_data.get('verdict') == "BUY" else ("red" if thesis_data.get('verdict') == "SELL" else "orange")
+                    st.markdown(f"### Verdict: :{v_color}[{thesis_data.get('verdict', 'N/A')}]")
+                with col2:
+                    st.markdown(f"**Rationale:** *{thesis_data.get('target_rationale', 'N/A')}*")
+
+                st.divider()
+
+                left_flow, right_flow = st.columns(2)
+                with left_flow:
+                    st.markdown("### 📊 Valuation & Variant Perception")
+                    st.write(thesis_data.get('valuation_case', 'N/A'))
+                    st.info(f"**Variant Perception:** {thesis_data.get('variant_perception', 'N/A')}")
+
+                with right_flow:
+                    st.markdown("### ⚠️ Risk Assessment & Data Grounding")
+                    st.error(f"**Primary Structural Risk:** {thesis_data.get('core_risk_factor', 'N/A')}")
+                    st.markdown("**Core Data Pillars Used:**")
+                    for item in thesis_data.get('quantitative_grounding', []):
+                        st.markdown(f"- `{item}`")
+
             if st.button("Run Quantitative Synthesis", use_container_width=True):
                 v_price = f"{curr_sym}{current_price:.2f}" if current_price is not None else "N/A"
                 v_dcf = f"{curr_sym}{ui_dcf_results.get('Base Case', 0):.2f}" if 'ui_dcf_results' in locals() and ui_dcf_results else "N/A"
@@ -2066,30 +2150,48 @@ if st.session_state.app_running and selected_ticker:
                     thesis_data = generate_ai_thesis(selected_ticker, full_name, metrics_summary)
                     
                     if isinstance(thesis_data, dict):
-                        col1, col2 = st.columns([1, 3])
-                        with col1:
-                            v_color = "green" if thesis_data.get('verdict') == "BUY" else ("red" if thesis_data.get('verdict') == "SELL" else "orange")
-                            st.markdown(f"### Verdict: :{v_color}[{thesis_data.get('verdict', 'N/A')}]")
-                        with col2:
-                            st.markdown(f"**Rationale:** *{thesis_data.get('target_rationale', 'N/A')}*")
-                        
-                        st.divider()
-                        
-                        left_flow, right_flow = st.columns(2)
-                        with left_flow:
-                            st.markdown("### 📊 Valuation & Variant Perception")
-                            st.write(thesis_data.get('valuation_case', 'N/A'))
-                            st.info(f"**Variant Perception:** {thesis_data.get('variant_perception', 'N/A')}")
-                            
-                        with right_flow:
-                            st.markdown("### ⚠️ Risk Assessment & Data Grounding")
-                            st.error(f"**Primary Structural Risk:** {thesis_data.get('core_risk_factor', 'N/A')}")
-                            st.markdown("**Core Data Pillars Used:**")
-                            for item in thesis_data.get('quantitative_grounding', []):
-                                st.markdown(f"- `{item}`")
-                                
+                        if "ai_thesis_store" not in st.session_state:
+                            st.session_state.ai_thesis_store = {}
+                        st.session_state.ai_thesis_store[selected_ticker] = thesis_data
                     elif isinstance(thesis_data, str) and thesis_data.startswith("ERROR:"):
                         # This will print the exact reason it failed to your screen
                         st.error(f"API Diagnostics: {thesis_data}")
                     else:
                         st.warning("Engine failed to parse structured thesis. Please try again.")
+
+            # Persistent display — reads from session_state so it survives
+            # reruns triggered by OTHER widgets (like the PDF download
+            # button below), instead of only existing during the exact
+            # script run where "Run Quantitative Synthesis" was clicked.
+            _persisted_thesis = st.session_state.get("ai_thesis_store", {}).get(selected_ticker)
+            if _persisted_thesis:
+                st.caption(f"✅ Cached synthesis for {selected_ticker} — included in the PDF Tear Sheet above.")
+                _render_thesis_display(_persisted_thesis)
+
+        # =========================================================
+        # PDF TEAR SHEET RENDER (deferred — see pdf_slot note above)
+        # =========================================================
+        cached_thesis = st.session_state.ai_thesis_store.get(selected_ticker)
+        with st.expander("🔧 Debug: PDF thesis linkage (safe to remove later)", expanded=False):
+            st.write("Ticker used as lookup key:", repr(selected_ticker))
+            st.write("Keys currently cached:", list(st.session_state.ai_thesis_store.keys()))
+            st.write("Thesis found for this ticker:", cached_thesis is not None)
+        pdf_ctx = {
+            "ticker": selected_ticker, "full_name": full_name, "sector": info.get('sector', 'N/A'),
+            "industry": info.get('industry', 'N/A'), "exchange": info.get('exchange', 'N/A'),
+            "curr_sym": curr_sym, "currency": currency, "current_price": current_price,
+            "market_cap": info.get('marketCap'), "beta": beta_raw, "pe": info.get('trailingPE'),
+            "high_52": info.get('fiftyTwoWeekHigh'), "low_52": info.get('fiftyTwoWeekLow'),
+            "div_yield": dividend_yield, "dcf_results": pdf_dcf, "graham_number": graham_number,
+            "dupont": dupont_data, "z_score": z_score, "z_model_type": model_type,
+            "z_safe_limit": z_safe_limit, "z_distress_limit": z_distress_limit,
+            "f_score": f_score, "roic": roic, "wacc": calculated_wacc, "df_market": df_market,
+            "ai_thesis": cached_thesis,
+        }
+        pdf_bytes = generate_pdf_report(pdf_ctx)
+        with pdf_slot:
+            st.download_button("📥 PDF Tear Sheet", data=pdf_bytes, file_name=f"{selected_ticker}_Tear_Sheet.pdf", mime="application/pdf", use_container_width=True)
+            if cached_thesis:
+                st.caption("Includes AI synthesis from this session.")
+            else:
+                st.caption("Run AI Synthesis (bottom tab) to include it in this PDF.")
