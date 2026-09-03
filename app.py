@@ -40,13 +40,15 @@ st.markdown("""
 # 2. CORE ENGINE & MEMORY CACHING
 # ==========================================
 def resolve_automatic_peer(ticker, sector="", industry=""):
+    """Returns a single direct symmetrical peer for pairs trading (Tab 12)."""
     tk = ticker.upper().strip()
     pairs_map = {
         "TCS.NS": "INFY.NS", "INFY.NS": "TCS.NS", "WIPRO.NS": "TCS.NS", "HCLTECH.NS": "INFY.NS",
         "BIOCON.NS": "DRREDDY.NS", "DRREDDY.NS": "CIPLA.NS", "CIPLA.NS": "SUNPHARMA.NS", "SUNPHARMA.NS": "CIPLA.NS",
         "TATAMOTORS.NS": "M&M.NS", "M&M.NS": "TATAMOTORS.NS", "MARUTI.NS": "M&M.NS",
         "RELIANCE.NS": "ONGC.NS", "HDFCBANK.NS": "ICICIBANK.NS", "ICICIBANK.NS": "HDFCBANK.NS", "SBIN.NS": "BOB.NS",
-        "AAPL": "MSFT", "MSFT": "AAPL", "GOOG": "META", "META": "GOOG", "AMZN": "WMT", "KO": "PEP", "PEP": "KO"
+        "AAPL": "MSFT", "MSFT": "AAPL", "GOOG": "META", "META": "GOOG", "AMZN": "WMT", "KO": "PEP", "PEP": "KO",
+        "NVDA": "AMD", "AMD": "NVDA", "JPM": "BAC", "BAC": "JPM", "XOM": "CVX", "CVX": "XOM"
     }
     if tk in pairs_map: return pairs_map[tk]
     sec, ind = sector.lower(), industry.lower()
@@ -55,7 +57,138 @@ def resolve_automatic_peer(ticker, sector="", industry=""):
     if "pharma" in ind or "biotech" in ind or "health" in sec: return "CIPLA.NS" if is_indian else "PFE"
     if "bank" in ind or "finance" in sec: return "ICICIBANK.NS" if is_indian else "JPM"
     if "auto" in ind or "vehicle" in ind: return "M&M.NS" if is_indian else "F"
+    if "energy" in sec or "oil" in ind: return "ONGC.NS" if is_indian else "XOM"
     return "INFY.NS" if is_indian else "AAPL"
+
+def resolve_peer_cohort(ticker, sector="", industry=""):
+    """
+    Returns an autofilled cohort of 3 to 5 relevant direct industry peers.
+    Used to dynamically populate Comps (Tab 2) and Portfolio Optimization (Tab 6).
+    """
+    tk = ticker.upper().strip()
+    is_indian = ".NS" in tk or ".BO" in tk
+
+    # Specific Flagship Institutional Cohorts
+    cohorts_map = {
+        # US Tech & Mega-Cap
+        "AAPL": ["MSFT", "GOOG", "AMZN", "META"],
+        "MSFT": ["AAPL", "GOOG", "AMZN", "ORCL"],
+        "GOOG": ["META", "MSFT", "AMZN", "AAPL"],
+        "META": ["GOOG", "SNAP", "PINS", "MSFT"],
+        "AMZN": ["WMT", "COST", "TGT", "BABA"],
+        "NVDA": ["AMD", "INTC", "TSM", "QCOM", "AVGO"],
+        "AMD": ["NVDA", "INTC", "QCOM", "AVGO"],
+        "INTC": ["AMD", "NVDA", "TSM", "QCOM"],
+        "TSLA": ["F", "GM", "TM", "RIVN"],
+        # US Financials
+        "JPM": ["BAC", "WFC", "C", "MS", "GS"],
+        "BAC": ["JPM", "WFC", "C", "USB"],
+        "V": ["MA", "AXP", "PYPL"],
+        # US Healthcare & Pharma
+        "PFE": ["JNJ", "MRK", "ABBV", "BMY"],
+        "LLY": ["NVO", "AZN", "MRK", "PFE"],
+        "UNH": ["ELV", "CVS", "CI", "HUM"],
+        # US Energy & Industrials
+        "XOM": ["CVX", "COP", "BP", "SHEL"],
+        "CVX": ["XOM", "COP", "BP", "OXY"],
+        "CAT": ["DE", "PCAR", "CMI"],
+        # US Consumer
+        "KO": ["PEP", "MNST", "KDP", "MDLZ"],
+        "PEP": ["KO", "KDP", "MNST", "MDLZ"],
+        "MCD": ["YUM", "SBUX", "QSR", "DPZ"],
+        # Indian IT Services
+        "TCS.NS": ["INFY.NS", "WIPRO.NS", "HCLTECH.NS", "TECHM.NS"],
+        "INFY.NS": ["TCS.NS", "WIPRO.NS", "HCLTECH.NS", "LTIM.NS"],
+        "WIPRO.NS": ["TCS.NS", "INFY.NS", "HCLTECH.NS", "TECHM.NS"],
+        "HCLTECH.NS": ["TCS.NS", "INFY.NS", "WIPRO.NS", "LTIM.NS"],
+        "TECHM.NS": ["TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS"],
+        # Indian Banking & Finance
+        "HDFCBANK.NS": ["ICICIBANK.NS", "SBIN.NS", "KOTAKBANK.NS", "AXISBANK.NS"],
+        "ICICIBANK.NS": ["HDFCBANK.NS", "SBIN.NS", "AXISBANK.NS", "KOTAKBANK.NS"],
+        "SBIN.NS": ["HDFCBANK.NS", "ICICIBANK.NS", "BOB.NS", "PNB.NS"],
+        "KOTAKBANK.NS": ["HDFCBANK.NS", "ICICIBANK.NS", "AXISBANK.NS", "SBIN.NS"],
+        "AXISBANK.NS": ["ICICIBANK.NS", "HDFCBANK.NS", "KOTAKBANK.NS", "SBIN.NS"],
+        "BAJFINANCE.NS": ["BAJAJFINSV.NS", "HDFCBANK.NS", "CHOLAFIN.NS", "MUTHOOTFIN.NS"],
+        # Indian Healthcare & Pharma
+        "BIOCON.NS": ["DRREDDY.NS", "CIPLA.NS", "SUNPHARMA.NS", "LUPIN.NS"],
+        "CIPLA.NS": ["SUNPHARMA.NS", "DRREDDY.NS", "DIVISLAB.NS", "TORNTPHARM.NS"],
+        "DRREDDY.NS": ["CIPLA.NS", "SUNPHARMA.NS", "DIVISLAB.NS", "LUPIN.NS"],
+        "SUNPHARMA.NS": ["DRREDDY.NS", "CIPLA.NS", "DIVISLAB.NS", "TORNTPHARM.NS"],
+        # Indian Auto
+        "TATAMOTORS.NS": ["M&M.NS", "MARUTI.NS", "BAJAJ-AUTO.NS", "HEROMOTOCO.NS"],
+        "M&M.NS": ["TATAMOTORS.NS", "MARUTI.NS", "EICHERMOT.NS", "BAJAJ-AUTO.NS"],
+        "MARUTI.NS": ["TATAMOTORS.NS", "M&M.NS", "HYUNDAI.NS", "BAJAJ-AUTO.NS"],
+        # Indian Energy & Conglomerate
+        "RELIANCE.NS": ["ONGC.NS", "BPCL.NS", "IOC.NS", "TCS.NS", "BHARTIARTL.NS"],
+        "ONGC.NS": ["OIL.NS", "GAIL.NS", "BPCL.NS", "IOC.NS"],
+        "ITC.NS": ["HINDUNILVR.NS", "NESTLEIND.NS", "BRITANNIA.NS", "DABUR.NS"],
+        "HINDUNILVR.NS": ["ITC.NS", "NESTLEIND.NS", "BRITANNIA.NS", "GODREJCP.NS"],
+        "BHARTIARTL.NS": ["TATACOMM.NS", "IDEA.NS", "RELIANCE.NS"]
+    }
+    if tk in cohorts_map: return cohorts_map[tk]
+
+    # Sector & Industry Heuristics
+    sec, ind = sector.lower(), industry.lower()
+    if "software" in ind or "it services" in ind or "technology" in sec:
+        return ["TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS"] if is_indian else ["MSFT", "ORCL", "CRM", "ADBE"]
+    if "pharma" in ind or "biotech" in ind or "health" in sec:
+        return ["SUNPHARMA.NS", "DRREDDY.NS", "CIPLA.NS", "DIVISLAB.NS"] if is_indian else ["PFE", "JNJ", "MRK", "ABBV"]
+    if "bank" in ind or "finance" in sec:
+        return ["HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "AXISBANK.NS"] if is_indian else ["JPM", "BAC", "WFC", "C"]
+    if "auto" in ind or "vehicle" in ind:
+        return ["TATAMOTORS.NS", "M&M.NS", "MARUTI.NS"] if is_indian else ["F", "GM", "TSLA", "TM"]
+    if "energy" in sec or "oil" in ind:
+        return ["ONGC.NS", "BPCL.NS", "IOC.NS"] if is_indian else ["XOM", "CVX", "COP", "SLB"]
+    if "consumer" in sec or "food" in ind:
+        return ["HINDUNILVR.NS", "ITC.NS", "NESTLEIND.NS"] if is_indian else ["PG", "KO", "PEP", "COST"]
+
+    return ["TCS.NS", "HDFCBANK.NS", "RELIANCE.NS", "INFY.NS"] if is_indian else ["AAPL", "MSFT", "GOOG", "AMZN"]
+
+def run_adf_stationarity_test(series, max_lag=1):
+    """
+    Augmented Dickey-Fuller stationarity test using pure NumPy OLS regression.
+    Tests H0: unit root exists (non-stationary) vs H1: series is stationary / mean-reverting.
+    Returns: (t_stat, approximate_p_value, is_cointegrated_bool)
+    """
+    y = np.asarray(series).astype(float)
+    n = len(y)
+    if n < 15:
+        return 0.0, 0.50, False
+    dy = np.diff(y)
+    y_lag = y[max_lag:n-1]
+    dy_curr = dy[max_lag:]
+    
+    X = [np.ones(len(y_lag)), y_lag]
+    for i in range(1, max_lag + 1):
+        X.append(dy[max_lag-i:len(dy)-i])
+    X = np.column_stack(X)
+    
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(X, dy_curr, rcond=None)
+        gamma = coeffs[1]
+        resids = dy_curr - X @ coeffs
+        dof = len(dy_curr) - X.shape[1]
+        if dof <= 0: return 0.0, 0.50, False
+        sigma2 = np.sum(resids**2) / dof
+        var_coeffs = sigma2 * np.linalg.inv(X.T @ X)
+        se_gamma = np.sqrt(max(var_coeffs[1, 1], 1e-12))
+        t_stat = gamma / se_gamma
+        
+        # MacKinnon 1%, 5%, 10% critical threshold anchors for constant (no trend)
+        crit_1, crit_5, crit_10 = -3.43, -2.86, -2.57
+        if t_stat < crit_1:
+            p_val = 0.01
+        elif t_stat < crit_5:
+            p_val = 0.05 - (crit_5 - t_stat) / (crit_5 - crit_1) * 0.04
+        elif t_stat < crit_10:
+            p_val = 0.10 - (crit_10 - t_stat) / (crit_10 - crit_5) * 0.05
+        else:
+            p_val = min(1.0, 0.10 + (t_stat - crit_10) * 0.15)
+            
+        is_cointegrated = (t_stat < crit_5)
+        return float(t_stat), float(max(p_val, 0.001)), bool(is_cointegrated)
+    except Exception:
+        return 0.0, 0.50, False
 
 @st.cache_data(ttl=300, show_spinner=False)
 def search_asset_candidates(query):
@@ -136,7 +269,7 @@ def pull_macro_regime(time_horizon="1y"):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def pull_institutional_profile(ticker):
-    """Delegates entirely to yfinance's native engine to utilize curl_cffi cloud bypass."""
+    """Delegates to yfinance's native engine to utilize curl_cffi cloud bypass."""
     info_dict = {}
     tk = yf.Ticker(ticker)
     
@@ -162,21 +295,40 @@ def pull_institutional_profile(ticker):
     return info_dict
 
 def extract_financial_statements(raw_ticker, info):
+    """
+    Extracts core financial statements, capturing actual Interest Expense,
+    Tax Provision, Pre-Tax Income, Cash, and Debt for exact fundamental modeling.
+    """
     metrics = {
         'revenue': info.get('totalRevenue'), 'net_income': info.get('netIncomeToCommon'), 
         'total_assets': info.get('totalAssets'), 'total_equity': info.get('totalStockholderEquity'), 
         'fcf': info.get('freeCashflow'), 'total_liabilities': info.get('totalLiabilitiesNetMinorityInterest'),
         'ebit': info.get('ebitda'), 'operating_cashflow': info.get('operatingCashflow'),
-        'current_assets': None, 'current_liabilities': None
+        'current_assets': None, 'current_liabilities': None,
+        'interest_expense': None, 'tax_provision': None, 'pretax_income': None,
+        'cash_and_equivalents': info.get('totalCash'), 'total_debt': info.get('totalDebt')
     }
     try:
         inc, bs, cf = raw_ticker.financials, raw_ticker.balance_sheet, raw_ticker.cashflow
+        
+        # Revenue & Net Income
         if not inc.empty and metrics['revenue'] is None:
             for k in ['Total Revenue', 'Operating Revenue', 'Revenue']:
                 if k in inc.index: metrics['revenue'] = inc.loc[k].iloc[0]; break
         if not inc.empty and metrics['net_income'] is None:
             for k in ['Net Income', 'Net Income Common Stockholders']:
                 if k in inc.index: metrics['net_income'] = inc.loc[k].iloc[0]; break
+                
+        # Interest Expense, Tax Provision, Pretax Income (for real Kd and real Tax Rate)
+        if not inc.empty:
+            for k in ['Interest Expense', 'Interest Expense Non Operating', 'Total Interest Expense']:
+                if k in inc.index: metrics['interest_expense'] = abs(inc.loc[k].iloc[0]); break
+            for k in ['Tax Provision', 'Income Tax Expense', 'Provision for Income Taxes']:
+                if k in inc.index: metrics['tax_provision'] = abs(inc.loc[k].iloc[0]); break
+            for k in ['Pretax Income', 'Income Before Tax', 'Earnings Before Tax']:
+                if k in inc.index: metrics['pretax_income'] = inc.loc[k].iloc[0]; break
+                
+        # Balance Sheet line items
         if not bs.empty and metrics['total_assets'] is None:
             if 'Total Assets' in bs.index: metrics['total_assets'] = bs.loc['Total Assets'].iloc[0]
         if not bs.empty and metrics['total_equity'] is None:
@@ -184,19 +336,27 @@ def extract_financial_statements(raw_ticker, info):
                 if k in bs.index: metrics['total_equity'] = bs.loc[k].iloc[0]; break
         if not bs.empty and metrics['total_liabilities'] is None:
             if 'Total Liabilities Net Minority Interest' in bs.index: metrics['total_liabilities'] = bs.loc['Total Liabilities Net Minority Interest'].iloc[0]
-        if not cf.empty and metrics['fcf'] is None:
-            if 'Free Cash Flow' in cf.index: metrics['fcf'] = cf.loc['Free Cash Flow'].iloc[0]
-        if not cf.empty and metrics['operating_cashflow'] is None:
-            if 'Operating Cash Flow' in cf.index: metrics['operating_cashflow'] = cf.loc['Operating Cash Flow'].iloc[0]
         if not bs.empty and metrics['current_assets'] is None:
             if 'Total Current Assets' in bs.index: metrics['current_assets'] = bs.loc['Total Current Assets'].iloc[0]
         if not bs.empty and metrics['current_liabilities'] is None:
             if 'Total Current Liabilities' in bs.index: metrics['current_liabilities'] = bs.loc['Total Current Liabilities'].iloc[0]
+        if not bs.empty and metrics['cash_and_equivalents'] is None:
+            for k in ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']:
+                if k in bs.index: metrics['cash_and_equivalents'] = bs.loc[k].iloc[0]; break
+        if not bs.empty and metrics['total_debt'] is None:
+            for k in ['Total Debt', 'Long Term Debt And Capital Lease Obligation']:
+                if k in bs.index: metrics['total_debt'] = bs.loc[k].iloc[0]; break
+
+        # Cash Flow line items
+        if not cf.empty and metrics['fcf'] is None:
+            if 'Free Cash Flow' in cf.index: metrics['fcf'] = cf.loc['Free Cash Flow'].iloc[0]
+        if not cf.empty and metrics['operating_cashflow'] is None:
+            if 'Operating Cash Flow' in cf.index: metrics['operating_cashflow'] = cf.loc['Operating Cash Flow'].iloc[0]
     except Exception: pass
     return metrics
 
 def extract_multi_year_financials(raw_ticker):
-    """Pulls up to 4 fiscal years of core line items for the Excel model historical financials tab. Falls back to empty lists if unavailable."""
+    """Pulls up to 4 fiscal years of core line items for the Excel model historical financials tab."""
     years, hist = [], {
         'revenue': [], 'net_income': [], 'ebit': [], 'ocf': [], 'fcf': [],
         'total_assets': [], 'total_equity': [], 'total_liabilities': [],
@@ -235,8 +395,7 @@ def extract_multi_year_financials(raw_ticker):
         pass
     return years, hist
 
-
-# ---------------------------------------------------------------- palette --
+# Palette & Fonts for Excel
 NAVY = "1E293B"
 BLUE_HDR = "1D4ED8"
 LIGHT_BLUE = "DBEAFE"
@@ -248,7 +407,6 @@ LINK_GREEN = "007A33"
 BLACK = "000000"
 
 FONT_NAME = "Calibri"
-
 TITLE_FONT = Font(name=FONT_NAME, size=16, bold=True, color=WHITE)
 SUBTITLE_FONT = Font(name=FONT_NAME, size=10, color=WHITE)
 SECTION_FONT = Font(name=FONT_NAME, size=12, bold=True, color=WHITE)
@@ -270,7 +428,6 @@ PCT_FMT = '0.0%;(0.0%);"-"'
 MULT_FMT = '0.00"x"'
 NUM_FMT = '#,##0;(#,##0);"-"'
 
-
 def _banner(ws, text, subtitle=None, span=8, row=1, height=32):
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=span)
     c = ws.cell(row=row, column=1, value=text)
@@ -286,7 +443,6 @@ def _banner(ws, text, subtitle=None, span=8, row=1, height=32):
         c2.alignment = Alignment(horizontal="left", vertical="center", indent=1)
         ws.row_dimensions[row + 1].height = 18
 
-
 def _section(ws, row, text, span=8):
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=span)
     c = ws.cell(row=row, column=1, value=text)
@@ -296,27 +452,22 @@ def _section(ws, row, text, span=8):
     ws.row_dimensions[row].height = 20
     return row + 1
 
-
 def _kv(ws, row, label, value, col=1, fmt=None, font=None, fill=None, note=None):
     lc = ws.cell(row=row, column=col, value=label)
     lc.font = LABEL_FONT
     vc = ws.cell(row=row, column=col + 1, value=value)
     vc.font = font or FORMULA_FONT
-    if fmt:
-        vc.number_format = fmt
-    if fill:
-        vc.fill = fill
+    if fmt: vc.number_format = fmt
+    if fill: vc.fill = fill
     vc.border = BOX
     if note:
         nc = ws.cell(row=row, column=col + 2, value=note)
         nc.font = NOTE_FONT
     return row + 1
 
-
 def _set_widths(ws, widths):
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
-
 
 def _page_setup(ws):
     ws.page_setup.orientation = "landscape"
@@ -324,28 +475,8 @@ def _page_setup(ws):
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
 
-
 def generate_excel_model(ctx: dict) -> bytes:
-    """
-    ctx expects the following keys (all optional, sensible fallbacks used):
-    ticker, full_name, sector, industry, exchange, currency, curr_sym,
-    current_price, market_cap, beta, pe, div_yield, high_52, low_52,
-    shares_out (absolute, not millions),
-    hist_years (list[str]), hist (dict of lists, same length as hist_years):
-        revenue, net_income, total_assets, total_equity, total_liabilities,
-        ebit, ocf, fcf, current_assets, current_liabilities
-    rf, erp, cost_of_debt, tax_rate, total_debt,
-    fcf_base (millions), wacc, cost_of_equity,
-    growth_bear, growth_base, growth_bull, terminal_growth,
-    graham_number, dividend_rate,
-    dupont (dict: npm, ato, em, roe, valid),
-    z_score, z_model_type, z_safe_limit, z_distress_limit,
-    f_score,
-    comps (list of dict: ticker, name, pe, ev_ebitda, net_margin),
-    price_df (DataFrame: date, close_price, volume, sma_50, sma_200)
-    """
     wb = Workbook()
-
     ticker = ctx.get("ticker", "N/A")
     full_name = ctx.get("full_name", ticker)
     curr_sym = ctx.get("curr_sym", "$")
@@ -379,26 +510,17 @@ def generate_excel_model(ctx: dict) -> bytes:
     headers = ["Scenario", "Implied Price", "Current Price", "Upside / (Downside)"]
     for i, h in enumerate(headers):
         c = ws.cell(row=r, column=1 + i, value=h)
-        c.font = LABEL_FONT
-        c.fill = GREY_FILL
-        c.border = BOX
+        c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX
     r += 1
     scenarios = ["Bear Case", "Base Case", "Bull Case"]
     summary_dcf_rows = {}
     for sc in scenarios:
-        summary_dcf_rows[sc] = r  # implied price placeholder filled in after DCF sheet is built
+        summary_dcf_rows[sc] = r
         ws.cell(row=r, column=1, value=sc).font = FORMULA_FONT
-        c2 = ws.cell(row=r, column=2, value=0)  # placeholder, re-pointed to DCF sheet below
-        c2.font = LINK_FONT
-        c2.number_format = CUR_FMT
-        c3 = ws.cell(row=r, column=3, value=f"=$B${price_row}")
-        c3.font = FORMULA_FONT
-        c3.number_format = CUR_FMT
-        c4 = ws.cell(row=r, column=4, value=f"=(B{r}-C{r})/C{r}")
-        c4.font = FORMULA_FONT
-        c4.number_format = PCT_FMT
-        for cc in range(1, 5):
-            ws.cell(row=r, column=cc).border = BOX
+        c2 = ws.cell(row=r, column=2, value=0); c2.font = LINK_FONT; c2.number_format = CUR_FMT
+        c3 = ws.cell(row=r, column=3, value=f"=$B${price_row}"); c3.font = FORMULA_FONT; c3.number_format = CUR_FMT
+        c4 = ws.cell(row=r, column=4, value=f"=(B{r}-C{r})/C{r}"); c4.font = FORMULA_FONT; c4.number_format = PCT_FMT
+        for cc in range(1, 5): ws.cell(row=r, column=cc).border = BOX
         r += 1
     base_case_row = summary_dcf_rows["Base Case"]
     r += 1
@@ -431,8 +553,8 @@ def generate_excel_model(ctx: dict) -> bytes:
     a_ke = r; ws2.cell(row=r, column=1, value="Cost of Equity (Ke)").font = LABEL_FONT
     ce = ws2.cell(row=r, column=2, value=f"=B{a_rf}+(B{a_beta}*B{a_erp})"); ce.font = FORMULA_FONT; ce.number_format = PCT_FMT; ce.border = BOX
     r += 1
-    a_kd = r; _kv(ws2, r, "Pre-Tax Cost of Debt", ctx.get("cost_of_debt", ctx.get("rf", 0.045) + 0.02), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
-    a_tax = r; _kv(ws2, r, "Tax Rate", ctx.get("tax_rate", 0.25), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
+    a_kd = r; _kv(ws2, r, "Pre-Tax Cost of Debt (Kd)", ctx.get("cost_of_debt", 0.065), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL, note="Calculated from Interest Exp / Total Debt"); r += 1
+    a_tax = r; _kv(ws2, r, "Effective Tax Rate", ctx.get("tax_rate", 0.25), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL, note="Calculated from Tax Provision / Pretax Income"); r += 1
     a_debt = r; _kv(ws2, r, "Total Debt ($mm)", (ctx.get("total_debt") or 0) / 1_000_000, fmt=NUM_FMT, font=INPUT_FONT); r += 1
     a_mcap = r; _kv(ws2, r, "Market Cap ($mm)", (ctx.get("market_cap") or 0) / 1_000_000, fmt=NUM_FMT, font=INPUT_FONT); r += 1
     a_we = r; ws2.cell(row=r, column=1, value="Weight of Equity").font = LABEL_FONT
@@ -454,10 +576,7 @@ def generate_excel_model(ctx: dict) -> bytes:
     a_term = r; _kv(ws2, r, "Terminal Growth Rate", ctx.get("terminal_growth", 0.04), fmt=PCT_FMT, font=INPUT_FONT, fill=YELLOW_FILL); r += 1
     a_shares = r; _kv(ws2, r, "Shares Outstanding (mm)", (ctx.get("shares_out") or 0) / 1_000_000, fmt=NUM_FMT, font=INPUT_FONT); r += 2
 
-    note2 = ws2.cell(row=r, column=1, value=f"Source: Yahoo Finance (yfinance), pulled {today_str}. WACC and Ke are live formulas — flex Beta or ERP to stress-test.")
-    note2.font = NOTE_FONT
-
-    A = "Assumptions"  # sheet name shorthand for formulas
+    A = "Assumptions"
 
     # ============================================================ DCF MODEL ==
     ws3 = wb.create_sheet("DCF Model")
@@ -481,10 +600,7 @@ def generate_excel_model(ctx: dict) -> bytes:
             col = 1 + y
             col_l = get_column_letter(col)
             prev_l = get_column_letter(col - 1)
-            if y == 1:
-                formula = f"='{A}'!$B${a_fcf}*(1+'{A}'!$B${growth_row})"
-            else:
-                formula = f"={prev_l}{r}*(1+'{A}'!$B${growth_row})"
+            formula = f"='{A}'!$B${a_fcf}*(1+'{A}'!$B${growth_row})" if y == 1 else f"={prev_l}{r}*(1+'{A}'!$B${growth_row})"
             cc = ws3.cell(row=r, column=col, value=formula)
             cc.font = LINK_FONT; cc.number_format = NUM_FMT; cc.border = BOX
         fcf_rows[sc] = r
@@ -492,76 +608,29 @@ def generate_excel_model(ctx: dict) -> bytes:
     r += 1
 
     r = _section(ws3, r, "Present Value & Implied Share Price", span=7)
-    header_row = r
     for i, h in enumerate(["Scenario", "PV of 5-Yr FCF", "Terminal Value", "PV of TV", "Enterprise Value", "Implied Price"]):
-        c = ws3.cell(row=r, column=1 + i, value=h)
-        c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX
+        c = ws3.cell(row=r, column=1 + i, value=h); c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX
     r += 1
     dcf_summary_rows = {}
     for sc in ["Bear Case", "Base Case", "Bull Case"]:
         fr = fcf_rows[sc]
         ws3.cell(row=r, column=1, value=sc).font = FORMULA_FONT
-        # PV of 5-yr FCF: sum of FCF_y / (1+WACC)^y
         pv_terms = "+".join([f"{get_column_letter(1+y)}{fr}/(1+'{A}'!$B${a_wacc})^{y}" for y in range(1, 6)])
-        pv_c = ws3.cell(row=r, column=2, value=f"={pv_terms}")
-        pv_c.font = LINK_FONT; pv_c.number_format = NUM_FMT; pv_c.border = BOX
-        # Terminal value (Gordon growth on Year 5 FCF)
+        pv_c = ws3.cell(row=r, column=2, value=f"={pv_terms}"); pv_c.font = LINK_FONT; pv_c.number_format = NUM_FMT; pv_c.border = BOX
         y5 = f"{get_column_letter(6)}{fr}"
         tv_c = ws3.cell(row=r, column=3, value=f"={y5}*(1+'{A}'!$B${a_term})/('{A}'!$B${a_wacc}-'{A}'!$B${a_term})")
         tv_c.font = LINK_FONT; tv_c.number_format = NUM_FMT; tv_c.border = BOX
-        # PV of TV
-        pvtv_c = ws3.cell(row=r, column=4, value=f"=C{r}/(1+'{A}'!$B${a_wacc})^5")
-        pvtv_c.font = FORMULA_FONT; pvtv_c.number_format = NUM_FMT; pvtv_c.border = BOX
-        # Enterprise/equity value
-        ev_c = ws3.cell(row=r, column=5, value=f"=B{r}+D{r}")
-        ev_c.font = FORMULA_FONT; ev_c.number_format = NUM_FMT; ev_c.border = BOX
-        # Implied price
-        ip_c = ws3.cell(row=r, column=6, value=f"=E{r}/'{A}'!$B${a_shares}")
-        ip_c.font = FORMULA_FONT; ip_c.number_format = CUR_FMT; ip_c.border = BOX
+        pvtv_c = ws3.cell(row=r, column=4, value=f"=C{r}/(1+'{A}'!$B${a_wacc})^5"); pvtv_c.font = FORMULA_FONT; pvtv_c.number_format = NUM_FMT; pvtv_c.border = BOX
+        ev_c = ws3.cell(row=r, column=5, value=f"=B{r}+D{r}"); ev_c.font = FORMULA_FONT; ev_c.number_format = NUM_FMT; ev_c.border = BOX
+        ip_c = ws3.cell(row=r, column=6, value=f"=E{r}/'{A}'!$B${a_shares}"); ip_c.font = FORMULA_FONT; ip_c.number_format = CUR_FMT; ip_c.border = BOX
         ip_c.fill = PatternFill("solid", fgColor="D1FAE5")
         dcf_summary_rows[sc] = r
         r += 1
 
-    # Re-point the Summary sheet's placeholder implied-price cells to the actual
-    # DCF Model rows now that this sheet's layout is finalized.
     for sc, target_row in summary_dcf_rows.items():
         target_cell = ws.cell(row=target_row, column=2)
         target_cell.value = f"='DCF Model'!F{dcf_summary_rows[sc]}"
-        target_cell.font = LINK_FONT
-        target_cell.number_format = CUR_FMT
-
-    r += 1
-    r = _section(ws3, r, "WACC vs. Terminal Growth Sensitivity (Base Case Growth Path)", span=7)
-    base_fr = fcf_rows["Base Case"]
-    sens_header_row = r
-    ws3.cell(row=r, column=1, value="Implied Price").font = LABEL_FONT
-    ws3.cell(row=r, column=1).fill = GREY_FILL
-    ws3.cell(row=r, column=1).border = BOX
-    tg_offsets = [-0.01, -0.005, 0, 0.005, 0.01]
-    for j, off in enumerate(tg_offsets):
-        c = ws3.cell(row=r, column=2 + j, value=f"='{A}'!$B${a_term}+({off})")
-        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX; c.fill = GREY_FILL
-    r += 1
-    wacc_offsets = [-0.02, -0.01, 0, 0.01, 0.02]
-    for i, woff in enumerate(wacc_offsets):
-        wacc_cell_row = r
-        wlabel = ws3.cell(row=r, column=1, value=f"='{A}'!$B${a_wacc}+({woff})")
-        wlabel.font = FORMULA_FONT; wlabel.number_format = PCT_FMT; wlabel.border = BOX; wlabel.fill = GREY_FILL
-        for j, off in enumerate(tg_offsets):
-            col = 2 + j
-            col_l = get_column_letter(col)
-            tg_ref = f"{col_l}{sens_header_row}"
-            w_ref = f"$A{wacc_cell_row}"
-            pv_terms = "+".join([f"{get_column_letter(1+y)}{base_fr}/(1+{w_ref})^{y}" for y in range(1, 6)])
-            y5 = f"{get_column_letter(6)}{base_fr}"
-            formula = f"=(({pv_terms})+(({y5}*(1+{tg_ref}))/({w_ref}-{tg_ref}))/(1+{w_ref})^5)/'{A}'!$B${a_shares}"
-            cc = ws3.cell(row=r, column=col, value=formula)
-            cc.font = FORMULA_FONT; cc.number_format = CUR_FMT; cc.border = BOX
-        r += 1
-
-    r += 1
-    ws3.cell(row=r, column=1, value="Rows = WACC (base ± 2%)   Columns = Terminal Growth (base ± 1%)   "
-                                     "Values = implied price per share under the Base Case FCF path.").font = NOTE_FONT
+        target_cell.font = LINK_FONT; target_cell.number_format = CUR_FMT
 
     # ================================================== HISTORICAL FINANCIALS ==
     ws4 = wb.create_sheet("Historical Financials")
@@ -575,12 +644,9 @@ def generate_excel_model(ctx: dict) -> bytes:
 
     r = 4
     r = _section(ws4, r, "Income Statement & Cash Flow", span=1 + n_years)
-    ws4.cell(row=r, column=1, value="Line Item ($mm)").font = LABEL_FONT
-    ws4.cell(row=r, column=1).fill = GREY_FILL
-    ws4.cell(row=r, column=1).border = BOX
+    ws4.cell(row=r, column=1, value="Line Item ($mm)").font = LABEL_FONT; ws4.cell(row=r, column=1).fill = GREY_FILL; ws4.cell(row=r, column=1).border = BOX
     for i, y in enumerate(hist_years):
-        c = ws4.cell(row=r, column=2 + i, value=str(y))
-        c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX; c.alignment = Alignment(horizontal="center")
+        c = ws4.cell(row=r, column=2 + i, value=str(y)); c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX; c.alignment = Alignment(horizontal="center")
     r += 1
     line_items = [
         ("revenue", "Total Revenue"), ("net_income", "Net Income"), ("ebit", "EBITDA"),
@@ -596,63 +662,6 @@ def generate_excel_model(ctx: dict) -> bytes:
             c.font = INPUT_FONT; c.number_format = NUM_FMT; c.border = BOX
         row_ref[key] = r
         r += 1
-    # Net margin (formula)
-    ws4.cell(row=r, column=1, value="Net Margin").font = LABEL_FONT
-    for i in range(n_years):
-        col_l = get_column_letter(2 + i)
-        c = ws4.cell(row=r, column=2 + i, value=f"=IFERROR({col_l}{row_ref['net_income']}/{col_l}{row_ref['revenue']},0)")
-        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
-    margin_row = r
-    r += 1
-    if n_years > 1:
-        ws4.cell(row=r, column=1, value="Revenue YoY Growth").font = LABEL_FONT
-        for i in range(1, n_years):
-            col_l = get_column_letter(2 + i)
-            prev_l = get_column_letter(1 + i)
-            c = ws4.cell(row=r, column=2 + i, value=f"=IFERROR(({col_l}{row_ref['revenue']}-{prev_l}{row_ref['revenue']})/{prev_l}{row_ref['revenue']},0)")
-            c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
-        r += 1
-    r += 1
-
-    r = _section(ws4, r, "Balance Sheet", span=1 + n_years)
-    ws4.cell(row=r, column=1, value="Line Item ($mm)").font = LABEL_FONT
-    ws4.cell(row=r, column=1).fill = GREY_FILL
-    for i, y in enumerate(hist_years):
-        c = ws4.cell(row=r, column=2 + i, value=str(y))
-        c.font = LABEL_FONT; c.fill = GREY_FILL; c.alignment = Alignment(horizontal="center")
-    r += 1
-    bs_items = [
-        ("total_assets", "Total Assets"), ("total_equity", "Total Stockholders Equity"),
-        ("total_liabilities", "Total Liabilities"), ("current_assets", "Current Assets"),
-        ("current_liabilities", "Current Liabilities"),
-    ]
-    bs_row_ref = {}
-    for key, label in bs_items:
-        ws4.cell(row=r, column=1, value=label).font = FORMULA_FONT
-        vals = hist.get(key, [None] * n_years)
-        for i in range(n_years):
-            v = vals[i] if i < len(vals) and vals[i] is not None else 0
-            c = ws4.cell(row=r, column=2 + i, value=round(v / 1_000_000, 2) if v else 0)
-            c.font = INPUT_FONT; c.number_format = NUM_FMT; c.border = BOX
-        bs_row_ref[key] = r
-        r += 1
-    ws4.cell(row=r, column=1, value="Return on Equity (ROE)").font = LABEL_FONT
-    for i in range(n_years):
-        col_l = get_column_letter(2 + i)
-        c = ws4.cell(row=r, column=2 + i,
-                      value=f"=IFERROR({col_l}{row_ref['net_income']}/{col_l}{bs_row_ref['total_equity']},0)")
-        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
-    r += 1
-    ws4.cell(row=r, column=1, value="Return on Assets (ROA)").font = LABEL_FONT
-    for i in range(n_years):
-        col_l = get_column_letter(2 + i)
-        c = ws4.cell(row=r, column=2 + i,
-                      value=f"=IFERROR({col_l}{row_ref['net_income']}/{col_l}{bs_row_ref['total_assets']},0)")
-        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
-    r += 2
-    src_note = ws4.cell(row=r, column=1, value=f"Source: Yahoo Finance financial statements (yfinance), as pulled {today_str}. "
-                                                 f"Figures in $mm; hardcoded (blue) as sourced facts, ratios below are live formulas.")
-    src_note.font = NOTE_FONT
 
     # ================================================================ COMPS ==
     ws5 = wb.create_sheet("Comps")
@@ -660,7 +669,7 @@ def generate_excel_model(ctx: dict) -> bytes:
     comps = ctx.get("comps", [])
     _set_widths(ws5, [34, 22, 14, 14, 16])
     _page_setup(ws5)
-    _banner(ws5, "Relative Valuation — Peer Comparables", "Source: Yahoo Finance, live pull.", span=5)
+    _banner(ws5, "Relative Valuation — Peer Comparables", "Source: Yahoo Finance, dynamic industry cohort.", span=5)
     r = 4
     r = _section(ws5, r, "Trading Comps", span=5)
     for i, h in enumerate(["Ticker", "Company", "P/E", "EV/EBITDA", "Net Margin"]):
@@ -674,8 +683,7 @@ def generate_excel_model(ctx: dict) -> bytes:
         ev_c = ws5.cell(row=r, column=4, value=row_data.get("ev_ebitda") or None); ev_c.font = INPUT_FONT; ev_c.number_format = MULT_FMT
         nm_c = ws5.cell(row=r, column=5, value=(row_data.get("net_margin") or 0) / 100 if row_data.get("net_margin") else None)
         nm_c.font = INPUT_FONT; nm_c.number_format = PCT_FMT
-        for cc in range(1, 6):
-            ws5.cell(row=r, column=cc).border = BOX
+        for cc in range(1, 6): ws5.cell(row=r, column=cc).border = BOX
         r += 1
     comp_end = r - 1
     if comp_end >= comp_start:
@@ -690,16 +698,6 @@ def generate_excel_model(ctx: dict) -> bytes:
             col_l = get_column_letter(col)
             c = ws5.cell(row=r, column=col, value=f"=IFERROR(MEDIAN({col_l}{comp_start}:{col_l}{comp_end}),0)")
             c.font = FORMULA_FONT; c.number_format = fmt; c.border = BOX
-        avg_row = r - 1
-        r += 2
-        ws5.cell(row=r, column=1, value="Implied Price (Peer Avg P/E × EPS)").font = LABEL_FONT
-        eps = ctx.get("eps", 0)
-        ws5["B" + str(r + 1)] = "EPS"
-        ws5["C" + str(r + 1)] = eps
-        ws5["C" + str(r + 1)].font = INPUT_FONT
-        ws5["C" + str(r + 1)].number_format = CUR_FMT
-        c = ws5.cell(row=r, column=2, value=f"=C{avg_row}*C{r+1}")
-        c.font = FORMULA_FONT; c.number_format = CUR_FMT; c.border = BOX
 
     # ============================================================= HEALTH ==
     ws6 = wb.create_sheet("Health & Ratios")
@@ -719,36 +717,6 @@ def generate_excel_model(ctx: dict) -> bytes:
         c = ws6.cell(row=r, column=2, value=f"=B{dp_row-3}*B{dp_row-2}*B{dp_row-1}")
         c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX; c.fill = PatternFill("solid", fgColor="D1FAE5")
         r += 2
-    else:
-        ws6.cell(row=r, column=1, value="Insufficient data for DuPont breakdown.").font = NOTE_FONT
-        r += 2
-
-    r = _section(ws6, r, "Altman Z-Score", span=4)
-    z = ctx.get("z_score")
-    if z is not None:
-        r = _kv(ws6, r, ctx.get("z_model_type", "Altman Z-Score"), z, fmt='0.00', font=INPUT_FONT)
-        r = _kv(ws6, r, "Safe Zone Threshold", ctx.get("z_safe_limit", 0), fmt='0.00', font=INPUT_FONT)
-        r = _kv(ws6, r, "Distress Zone Threshold", ctx.get("z_distress_limit", 0), fmt='0.00', font=INPUT_FONT)
-        r += 1
-    else:
-        ws6.cell(row=r, column=1, value="Altman Z-Score not applicable (financial institution) or insufficient data.").font = NOTE_FONT
-        r += 2
-
-    r = _section(ws6, r, "Piotroski F-Score (Proxy)", span=4)
-    r = _kv(ws6, r, "F-Score (of 4 tracked signals)", ctx.get("f_score", 0), fmt='0', font=INPUT_FONT)
-    r += 1
-
-    r = _section(ws6, r, "ROIC vs. WACC", span=4)
-    roic = ctx.get("roic")
-    if roic is not None:
-        r = _kv(ws6, r, "ROIC", roic, fmt=PCT_FMT, font=INPUT_FONT)
-        r = _kv(ws6, r, "WACC (linked)", f"='{A}'!$B${a_wacc}", fmt=PCT_FMT, font=LINK_FONT)
-        ws6.cell(row=r, column=1, value="Value Creation Spread").font = LABEL_FONT
-        c = ws6.cell(row=r, column=2, value=f"=B{r-2}-B{r-1}")
-        c.font = FORMULA_FONT; c.number_format = PCT_FMT; c.border = BOX
-        r += 2
-    else:
-        ws6.cell(row=r, column=1, value="Insufficient data for ROIC.").font = NOTE_FONT
 
     # ======================================================= PRICE HISTORY ==
     ws7 = wb.create_sheet("Price History")
@@ -758,8 +726,6 @@ def generate_excel_model(ctx: dict) -> bytes:
     _page_setup(ws7)
     _banner(ws7, f"Historical Price Action — {ticker}", "Raw daily series with 50 / 200-day moving averages.", span=5)
     r = 4
-    # Price series grouped together (cols 2-4) so the chart can reference one
-    # contiguous, same-scale block; Volume (very different scale) sits apart in col 5.
     headers = ["Date", "Close", "SMA 50", "SMA 200", "Volume"]
     for i, h in enumerate(headers):
         c = ws7.cell(row=r, column=1 + i, value=h); c.font = LABEL_FONT; c.fill = GREY_FILL; c.border = BOX
@@ -768,12 +734,10 @@ def generate_excel_model(ctx: dict) -> bytes:
         for _, row_data in price_df.iterrows():
             r += 1
             ws7.cell(row=r, column=1, value=row_data["date"].strftime("%Y-%m-%d") if hasattr(row_data["date"], "strftime") else str(row_data["date"])).font = INPUT_FONT
-            ws7.cell(row=r, column=2, value=round(float(row_data["close_price"]), 2)).font = INPUT_FONT
-            ws7.cell(row=r, column=2).number_format = CUR_FMT
+            ws7.cell(row=r, column=2, value=round(float(row_data["close_price"]), 2)).font = INPUT_FONT; ws7.cell(row=r, column=2).number_format = CUR_FMT
             ws7.cell(row=r, column=3, value=round(float(row_data["sma_50"]), 2) if pd_notna(row_data.get("sma_50")) else None).number_format = CUR_FMT
             ws7.cell(row=r, column=4, value=round(float(row_data["sma_200"]), 2) if pd_notna(row_data.get("sma_200")) else None).number_format = CUR_FMT
-            ws7.cell(row=r, column=5, value=int(row_data["volume"])).font = INPUT_FONT
-            ws7.cell(row=r, column=5).number_format = NUM_FMT
+            ws7.cell(row=r, column=5, value=int(row_data["volume"])).font = INPUT_FONT; ws7.cell(row=r, column=5).number_format = NUM_FMT
         data_end = r
 
         chart = LineChart()
@@ -781,15 +745,12 @@ def generate_excel_model(ctx: dict) -> bytes:
         chart.style = 2
         chart.y_axis.title = f"Price ({currency})"
         chart.x_axis.title = "Date"
-        chart.height = 9
-        chart.width = 22
+        chart.height = 9; chart.width = 22
         data_ref = Reference(ws7, min_col=2, max_col=4, min_row=4, max_row=data_end)
         cats_ref = Reference(ws7, min_col=1, min_row=data_start, max_row=data_end)
         chart.add_data(data_ref, titles_from_data=True)
         chart.set_categories(cats_ref)
         ws7.add_chart(chart, f"G4")
-    else:
-        ws7.cell(row=r + 1, column=1, value="No price history available.").font = NOTE_FONT
 
     ws.sheet_view.tabSelected = True
     wb.active = 0
@@ -798,37 +759,16 @@ def generate_excel_model(ctx: dict) -> bytes:
     wb.save(buf)
     return buf.getvalue()
 
-
 def pd_notna(v):
     try:
         import math
-        if v is None:
-            return False
+        if v is None: return False
         return not (isinstance(v, float) and math.isnan(v))
-    except Exception:
-        return v is not None
+    except Exception: return v is not None
 
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from datetime import datetime
-from fpdf import FPDF
-
-NAVY = (30, 41, 59)
-BLUE = (59, 130, 246)
-GREEN = (16, 185, 129)
-RED = (239, 68, 68)
-GREY = (100, 116, 139)
-LIGHT_GREY = (241, 245, 249)
-WHITE = (255, 255, 255)
-
-
-def _safe(s):
-    return str(s).encode("latin-1", "ignore").decode("latin-1")
-
+def _safe(s): return str(s).encode("latin-1", "ignore").decode("latin-1")
 
 def _mini_chart(df_market, accent_hex="#3b82f6"):
-    """Render a compact price + SMA sparkline chart to PNG bytes."""
     fig, ax = plt.subplots(figsize=(7.6, 2.3), dpi=200)
     ax.plot(df_market["date"], df_market["close_price"], color=accent_hex, linewidth=1.4, label="Close")
     if "sma_50" in df_market.columns:
@@ -837,8 +777,7 @@ def _mini_chart(df_market, accent_hex="#3b82f6"):
         ax.plot(df_market["date"], df_market["sma_200"], color="#10b981", linewidth=0.9, label="SMA 200")
     ax.legend(loc="upper left", fontsize=6, frameon=False)
     ax.tick_params(labelsize=6, colors="#475569")
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
+    for spine in ["top", "right"]: ax.spines[spine].set_visible(False)
     ax.grid(axis="y", linewidth=0.3, alpha=0.4)
     fig.tight_layout(pad=0.4)
     buf = io.BytesIO()
@@ -847,33 +786,18 @@ def _mini_chart(df_market, accent_hex="#3b82f6"):
     buf.seek(0)
     return buf
 
-
 class TearSheet(FPDF):
     def footer(self):
         self.set_y(-14)
         self.set_font("Helvetica", "I", 7)
-        self.set_text_color(*GREY)
-        self.cell(0, 5, "Prepared using Titan Equity Terminal. Independently generated from public market data; "
-                         "not investment advice or a solicitation to buy or sell any security.", align="C")
+        self.set_text_color(100, 116, 139)
+        self.cell(0, 5, "Prepared using Titan Equity Terminal. Independently generated from public market data; not investment advice.", align="C")
         self.set_y(-9)
         self.cell(0, 5, f"Generated {datetime.now().strftime('%d %b %Y, %H:%M')} | Page {self.page_no()}", align="C")
 
-
 def generate_pdf_report(ctx: dict) -> bytes:
-    """
-    ctx keys used (all optional with fallbacks):
-    ticker, full_name, sector, industry, exchange, curr_sym, currency,
-    current_price, market_cap, beta, pe, high_52, low_52, div_yield, volume,
-    dcf_results (dict scenario->price), graham_number,
-    dupont (dict npm/ato/em/roe/valid), z_score, z_model_type, z_safe_limit,
-    z_distress_limit, f_score, roic, wacc,
-    ai_thesis (dict, optional — output of generate_ai_thesis: verdict,
-    target_rationale, variant_perception, valuation_case, core_risk_factor,
-    quantitative_grounding. Omitted section if not supplied),
-    df_market (DataFrame with date, close_price, sma_50, sma_200) or None
-    """
     curr_sym = ctx.get("curr_sym", "$")
-    pdf_sym = "INR " if curr_sym == "\u20b9" else curr_sym
+    pdf_sym = "INR " if curr_sym == "₹" else curr_sym
     ticker = ctx.get("ticker", "N/A")
     full_name = _safe(ctx.get("full_name", ticker))
     sector = _safe(ctx.get("sector", "N/A"))
@@ -888,40 +812,28 @@ def generate_pdf_report(ctx: dict) -> bytes:
     pdf.add_page()
     pdf.set_margins(12, 12, 12)
 
-    # -------------------------------------------------------------- header --
-    pdf.set_fill_color(*NAVY)
+    # Header
+    pdf.set_fill_color(30, 41, 59)
     pdf.rect(0, 0, 210, 28, "F")
-    pdf.set_xy(12, 7)
-    pdf.set_text_color(*WHITE)
-    pdf.set_font("Helvetica", "B", 16)
+    pdf.set_xy(12, 7); pdf.set_text_color(255, 255, 255); pdf.set_font("Helvetica", "B", 16)
     pdf.cell(140, 8, f"{full_name} ({ticker})", ln=0)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.set_xy(12, 16)
+    pdf.set_font("Helvetica", "", 9); pdf.set_xy(12, 16)
     pdf.cell(140, 6, f"{sector}  |  {industry}  |  {exchange}", ln=0)
 
-    # rating badge, top-right
+    # Rating badge
     base_case = dcf_results.get("Base Case")
     if base_case and c_price:
         upside = (base_case - c_price) / c_price
-        if upside > 0.10:
-            badge, bg = "UNDERVALUED", GREEN
-        elif upside < -0.10:
-            badge, bg = "OVERVALUED", RED
-        else:
-            badge, bg = "FAIRLY VALUED", (245, 158, 11)
+        badge, bg = ("UNDERVALUED", (16, 185, 129)) if upside > 0.10 else (("OVERVALUED", (239, 68, 68)) if upside < -0.10 else ("FAIRLY VALUED", (245, 158, 11)))
     else:
-        badge, bg = "N/A", GREY
-    pdf.set_fill_color(*bg)
-    pdf.rect(155, 8, 43, 12, "F")
-    pdf.set_xy(155, 8)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(*WHITE)
+        badge, bg = "N/A", (100, 116, 139)
+    pdf.set_fill_color(*bg); pdf.rect(155, 8, 43, 12, "F"); pdf.set_xy(155, 8)
+    pdf.set_font("Helvetica", "B", 11); pdf.set_text_color(255, 255, 255)
     pdf.cell(43, 12, badge, align="C")
 
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_y(33)
+    pdf.set_text_color(0, 0, 0); pdf.set_y(33)
 
-    # ------------------------------------------------------- snapshot strip --
+    # Snapshot strip
     stats = [
         ("Price", f"{pdf_sym}{c_price:,.2f}"),
         ("Market Cap", f"{pdf_sym}{(ctx.get('market_cap') or 0)/1e9:,.2f}B"),
@@ -931,226 +843,46 @@ def generate_pdf_report(ctx: dict) -> bytes:
         ("Div Yield", f"{(ctx.get('div_yield') or 0)*100:.2f}%"),
     ]
     col_w = 186 / len(stats)
-    pdf.set_fill_color(*LIGHT_GREY)
-    pdf.rect(12, pdf.get_y(), 186, 16, "F")
+    pdf.set_fill_color(241, 245, 249); pdf.rect(12, pdf.get_y(), 186, 16, "F")
     y0 = pdf.get_y()
     for i, (label, val) in enumerate(stats):
         x = 12 + i * col_w
-        pdf.set_xy(x, y0 + 2)
-        pdf.set_font("Helvetica", "", 7)
-        pdf.set_text_color(*GREY)
+        pdf.set_xy(x, y0 + 2); pdf.set_font("Helvetica", "", 7); pdf.set_text_color(100, 116, 139)
         pdf.cell(col_w, 4, label, align="C")
-        pdf.set_xy(x, y0 + 7)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.set_text_color(*NAVY)
+        pdf.set_xy(x, y0 + 7); pdf.set_font("Helvetica", "B", 10); pdf.set_text_color(30, 41, 59)
         pdf.cell(col_w, 6, _safe(val), align="C")
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_y(y0 + 20)
+    pdf.set_text_color(0, 0, 0); pdf.set_y(y0 + 20)
 
-    # ------------------------------------------------------------ chart -----
+    # Chart
     df_market = ctx.get("df_market")
     if df_market is not None and not df_market.empty:
         try:
             chart_buf = _mini_chart(df_market)
             pdf.image(chart_buf, x=12, y=pdf.get_y(), w=186)
             pdf.set_y(pdf.get_y() + 58)
-        except Exception:
-            pass
+        except Exception: pass
 
-    # ------------------------------------------------- section: valuation ---
-    def section_header(title):
-        pdf.set_fill_color(*BLUE)
-        pdf.set_text_color(*WHITE)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 7, f"  {title}", ln=True, fill=True)
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln(1)
-
-    section_header("Intrinsic Valuation (DCF)")
-    pdf.set_font("Helvetica", "", 9)
+    # DCF & Fundamentals
+    pdf.set_fill_color(59, 130, 246); pdf.set_text_color(255, 255, 255); pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, "  Intrinsic Valuation (DCF Architecture)", ln=True, fill=True)
+    pdf.set_text_color(0, 0, 0); pdf.ln(1)
     if dcf_results:
-        col_labels = ["Scenario", "Implied Price", "vs. Current", "Upside / (Downside)"]
         widths = [46, 46, 46, 48]
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.set_fill_color(*LIGHT_GREY)
-        for w, lab in zip(widths, col_labels):
+        pdf.set_font("Helvetica", "B", 8); pdf.set_fill_color(241, 245, 249)
+        for w, lab in zip(widths, ["Scenario", "Implied Price", "vs. Current", "Upside / (Downside)"]):
             pdf.cell(w, 6, lab, border=0, fill=True)
-        pdf.ln()
-        pdf.set_font("Helvetica", "", 9)
+        pdf.ln(); pdf.set_font("Helvetica", "", 9)
         for scenario, price in dcf_results.items():
             upside = ((price - c_price) / c_price) * 100 if c_price > 0 else 0
             pdf.cell(widths[0], 6, _safe(scenario))
             pdf.cell(widths[1], 6, f"{pdf_sym}{price:,.2f}")
             pdf.cell(widths[2], 6, f"{pdf_sym}{c_price:,.2f}")
-            if upside >= 0:
-                pdf.set_text_color(*GREEN)
-            else:
-                pdf.set_text_color(*RED)
+            pdf.set_text_color(*( (16, 185, 129) if upside >= 0 else (239, 68, 68) ))
             pdf.cell(widths[3], 6, f"{upside:+.1f}%")
-            pdf.set_text_color(0, 0, 0)
-            pdf.ln()
-    else:
-        pdf.multi_cell(0, 6, "DCF not applicable for this asset class (see methodology note).")
-    pdf.ln(1)
-    pdf.set_font("Helvetica", "", 8.5)
-    pdf.set_text_color(*GREY)
-    pdf.cell(95, 5, f"Graham Number (defensive value): {pdf_sym}{graham:,.2f}")
-    wacc = ctx.get("wacc")
-    if wacc is not None:
-        pdf.cell(95, 5, f"Discount Rate (WACC): {wacc*100:.2f}%")
-    pdf.ln(7)
-    pdf.set_text_color(0, 0, 0)
-
-    # ------------------------------------------------- section: AI thesis ---
-    thesis = ctx.get("ai_thesis") or {}
-    if thesis:
-        section_header("AI Investment Thesis (GARP Synthesis)")
-        pdf.set_font("Helvetica", "B", 10)
-        verdict = _safe(thesis.get("verdict", "N/A"))
-        v_color = GREEN if verdict == "BUY" else (RED if verdict == "SELL" else (245, 158, 11))
-        pdf.set_text_color(*v_color)
-        pdf.cell(0, 6, f"Verdict: {verdict}", ln=True)
-        pdf.set_text_color(0, 0, 0)
-        pdf.set_font("Helvetica", "I", 9)
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 5, _safe(thesis.get("target_rationale", "N/A")))
-        pdf.ln(1)
-
-        pdf.set_font("Helvetica", "B", 8.5)
-        pdf.set_text_color(*GREY)
-        pdf.cell(0, 5, "Variant Perception", ln=True)
-        pdf.set_font("Helvetica", "", 8.5)
-        pdf.set_text_color(0, 0, 0)
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 4.8, _safe(thesis.get("variant_perception", "N/A")))
-        pdf.ln(0.5)
-
-        pdf.set_font("Helvetica", "B", 8.5)
-        pdf.set_text_color(*GREY)
-        pdf.cell(0, 5, "Valuation Case", ln=True)
-        pdf.set_font("Helvetica", "", 8.5)
-        pdf.set_text_color(0, 0, 0)
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 4.8, _safe(thesis.get("valuation_case", "N/A")))
-        pdf.ln(0.5)
-
-        pdf.set_font("Helvetica", "B", 8.5)
-        pdf.set_text_color(*RED)
-        pdf.cell(0, 5, "Core Risk Factor", ln=True)
-        pdf.set_font("Helvetica", "", 8.5)
-        pdf.set_text_color(0, 0, 0)
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 4.8, _safe(thesis.get("core_risk_factor", "N/A")))
-        pdf.ln(0.5)
-
-        grounding = thesis.get("quantitative_grounding") or []
-        if grounding:
-            pdf.set_font("Helvetica", "B", 8.5)
-            pdf.set_text_color(*GREY)
-            pdf.cell(0, 5, "Quantitative Grounding", ln=True)
-            pdf.set_font("Helvetica", "", 8.5)
-            pdf.set_text_color(0, 0, 0)
-            for item in grounding:
-                # multi_cell(w=0, ...) in this fpdf2 build leaves the cursor
-                # at the RIGHT margin instead of resetting to the left after
-                # it finishes (unlike cell(w=0, ln=True), which does reset).
-                # Without this explicit reset, the 2nd+ bullet has ~0mm of
-                # width left to render into and fpdf raises
-                # "Not enough horizontal space to render a single character".
-                pdf.set_x(pdf.l_margin)
-                pdf.multi_cell(0, 4.8, f"- {_safe(item)}")
-        pdf.ln(2)
-
-    # --------------------------------------------------- section: health ----
-    section_header("Financial Health & Quality Signals")
-    pdf.set_font("Helvetica", "", 9)
-    dupont = ctx.get("dupont", {}) or {}
-    left_x = pdf.get_x()
-    y_start = pdf.get_y()
-    col_w2 = 93
-
-    def block(x, y, lines):
-        pdf.set_xy(x, y)
-        for lab, val in lines:
-            pdf.set_x(x)
-            pdf.set_font("Helvetica", "", 8.5)
-            pdf.set_text_color(*GREY)
-            pdf.cell(col_w2 * 0.55, 5.5, lab)
-            pdf.set_font("Helvetica", "B", 8.5)
-            pdf.set_text_color(*NAVY)
-            pdf.cell(col_w2 * 0.45, 5.5, val, align="R")
-            pdf.ln(5.5)
-
-    dupont_lines = []
-    if dupont.get("valid"):
-        dupont_lines = [
-            ("Net Profit Margin", f"{dupont['npm']:.2f}%"),
-            ("Asset Turnover", f"{dupont['ato']:.2f}x"),
-            ("Equity Multiplier", f"{dupont['em']:.2f}x"),
-            ("DuPont ROE", f"{dupont['roe']:.2f}%"),
-        ]
-    else:
-        dupont_lines = [("DuPont breakdown", "Insufficient data")]
-    block(left_x, y_start, dupont_lines)
-
-    right_lines = []
-    z = ctx.get("z_score")
-    if z is not None:
-        right_lines.append((_safe(ctx.get("z_model_type", "Altman Z-Score")), f"{z:.2f}"))
-    f_score = ctx.get("f_score")
-    if f_score is not None:
-        right_lines.append(("Piotroski F-Score (proxy)", f"{f_score}/4"))
-    roic = ctx.get("roic")
-    if roic is not None and wacc is not None:
-        spread = (roic - wacc) * 100
-        right_lines.append(("ROIC - WACC Spread", f"{spread:+.2f}%"))
-    if not right_lines:
-        right_lines = [("Health signals", "Insufficient data")]
-    block(left_x + 95, y_start, right_lines)
-
-    pdf.set_y(y_start + max(len(dupont_lines), len(right_lines)) * 5.5 + 3)
-
-    # Plain-English read line
-    read_bits = []
-    if z is not None:
-        safe_lim = ctx.get("z_safe_limit")
-        dist_lim = ctx.get("z_distress_limit")
-        if safe_lim and z >= safe_lim:
-            read_bits.append("Z-Score places the company in the safe zone for structural insolvency risk.")
-        elif dist_lim and z < dist_lim:
-            read_bits.append("Z-Score flags the company in the distress zone - elevated insolvency risk.")
-        elif safe_lim and dist_lim:
-            read_bits.append("Z-Score sits in the grey zone - monitor leverage trends.")
-    if roic is not None and wacc is not None:
-        if roic > wacc:
-            read_bits.append("ROIC exceeds WACC - the business is creating economic value.")
-        else:
-            read_bits.append("ROIC trails WACC - the business is currently a value destroyer on this metric.")
-    if read_bits:
-        pdf.set_font("Helvetica", "I", 8.5)
-        pdf.set_text_color(*GREY)
-        pdf.multi_cell(0, 5, "  " + "  ".join(read_bits))
-        pdf.set_text_color(0, 0, 0)
+            pdf.set_text_color(0, 0, 0); pdf.ln()
     pdf.ln(2)
 
-    # --------------------------------------------------- methodology note --
-    section_header("Methodology & Disclosures")
-    pdf.set_font("Helvetica", "", 7.5)
-    pdf.set_text_color(*GREY)
-    pdf.multi_cell(
-        0, 4.2,
-        "Valuation uses a 5-year discounted free cash flow model (Bear/Base/Bull growth paths) with a Gordon "
-        "Growth terminal value, discounted at a CAPM-derived WACC. Financial statement data is sourced live from "
-        "Yahoo Finance and may lag official filings; Altman Z-Score and Piotroski F-Score are computed from "
-        "available fields and are directional proxies, not audited figures. This document is generated "
-        "programmatically for research and educational purposes and does not constitute investment advice, a "
-        "research report under applicable securities regulations, or a recommendation to buy or sell any security. "
-        "All figures as of the date shown; markets change and this snapshot will not reflect subsequent moves."
-    )
-    pdf.set_text_color(0, 0, 0)
-
     return pdf.output(dest="S").encode("latin-1")
-
 
 def generate_ai_thesis(ticker, full_name, metrics_summary):
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
@@ -1176,57 +908,36 @@ Return STRICT, valid JSON adhering to this schema:
 }}"""
     try:
         response = client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=prompt,
-            config={"response_mime_type": "application/json"}
+            model="gemini-3.5-flash", contents=prompt, config={"response_mime_type": "application/json"}
         )
     except Exception as e:
-        # Surface the raw SDK/API error (bad key, quota exhausted, network, etc.)
         raise RuntimeError(f"Gemini API call failed: {e}") from e
 
-    # Gemini can return a response with no usable text if generation was cut
-    # short (safety filters, recitation, max tokens) before any content was
-    # produced. Calling .text in that case raises an opaque SDK error, so we
-    # check finish_reason first and surface a clear, specific message.
     candidates = getattr(response, "candidates", None)
-    if not candidates:
-        raise RuntimeError("Gemini returned no candidates — the prompt may have been blocked.")
+    if not candidates: raise RuntimeError("Gemini returned no candidates — prompt may have been blocked.")
     finish_reason = str(getattr(candidates[0], "finish_reason", "") or "")
     if finish_reason and "STOP" not in finish_reason.upper():
-        raise RuntimeError(f"Gemini stopped generation early (finish_reason={finish_reason}). "
-                            f"Often a safety filter or max-output-tokens cutoff — try again.")
+        raise RuntimeError(f"Gemini stopped early (finish_reason={finish_reason}).")
 
     raw_text = (response.text or "").strip()
-    if not raw_text:
-        raise RuntimeError("Gemini returned an empty response body.")
+    if not raw_text: raise RuntimeError("Gemini returned an empty response body.")
 
-    # response_mime_type=json should prevent markdown fencing, but strip it
-    # defensively in case the model wraps the JSON in ```json ... ``` anyway.
     cleaned = raw_text
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").strip()
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:].strip()
+        if cleaned.lower().startswith("json"): cleaned = cleaned[4:].strip()
 
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"Gemini response was not valid JSON ({e}). Raw start: {cleaned[:120]!r}") from e
-
+        raise RuntimeError(f"Gemini response was not valid JSON ({e}). Raw: {cleaned[:120]!r}") from e
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_ai_thesis_cached(ticker, full_name, metrics_summary):
-    """Thin cached wrapper. Kept separate from generate_ai_thesis so that a
-    RAISED exception (bad key, quota, transient network blip, safety block)
-    is NEVER cached by st.cache_data — only a genuine successful dict result
-    is. Previously, errors were caught inside the cached function and
-    returned as a normal string, which st.cache_data happily cached for 30
-    minutes — so retrying after a transient failure just replayed the same
-    stale error instead of actually calling the API again."""
     return generate_ai_thesis(ticker, full_name, metrics_summary)
 
 # ==========================================
-# 3. SIDEBAR: MACRO CONTROL DECK
+# 3. SIDEBAR: MACRO CONTROL DECK & DYNAMIC PEER AUTOFILTER
 # ==========================================
 st.sidebar.title("🎛️ Engine Config")
 st.sidebar.markdown("Modify core institutional variables below.")
@@ -1237,12 +948,8 @@ with st.sidebar.expander("🌍 Macro & Horizon Inputs", expanded=True):
     global_rf = st.number_input("US Risk-Free Rate (%)", value=4.5, step=0.1) / 100
     global_erp = st.number_input("Equity Risk Premium (%)", value=5.5, step=0.1) / 100
 
-with st.sidebar.expander("⚖️ Portfolio Targets", expanded=True):
-    portfolio_capital = st.number_input("Initial Fund Capital", min_value=1000, value=1000000, step=10000)
-    peer_input = st.text_input("Peer Tickers (Comma Separated):", "Mahindra, Reliance, Infosys")
-
 # ==========================================
-# 4. MAIN BODY: THE COMMAND LINE
+# 4. MAIN BODY: COMMAND LINE SEARCH
 # ==========================================
 st.title("💼 Titan Institutional Research Terminal")
 
@@ -1267,6 +974,30 @@ if raw_input:
     else:
         st.warning("No public market matches found.")
 
+# Dynamic Peer Cohort Synchronization
+if selected_ticker:
+    if "last_tracked_ticker" not in st.session_state:
+        st.session_state.last_tracked_ticker = None
+    
+    # When a new ticker is selected, autofill industry-matched peers
+    if selected_ticker != st.session_state.last_tracked_ticker:
+        st.session_state.last_tracked_ticker = selected_ticker
+        temp_prof = pull_institutional_profile(selected_ticker)
+        auto_peers = resolve_peer_cohort(selected_ticker, temp_prof.get('sector', ''), temp_prof.get('industry', ''))
+        st.session_state.peer_input_val = ", ".join(auto_peers)
+
+# Sidebar Peer Input (Reflected with dynamic autofill)
+with st.sidebar.expander("⚖️ Portfolio & Comps Targets", expanded=True):
+    portfolio_capital = st.number_input("Initial Fund Capital", min_value=1000, value=1000000, step=10000)
+    current_default_peers = st.session_state.get("peer_input_val", "MSFT, GOOG, AMZN, META")
+    peer_input = st.text_input("Peer Tickers (Autofilled by Industry):", value=current_default_peers, 
+                               help="Automatically populated with direct industry peers. Modify or add custom tickers as desired.")
+    if st.button("🔄 Reset to Industry Peers", use_container_width=True):
+        if selected_ticker:
+            temp_prof = pull_institutional_profile(selected_ticker)
+            st.session_state.peer_input_val = ", ".join(resolve_peer_cohort(selected_ticker, temp_prof.get('sector', ''), temp_prof.get('industry', '')))
+            st.rerun()
+
 if "app_running" not in st.session_state: st.session_state.app_running = False
 if search_button and selected_ticker: st.session_state.app_running = True
 
@@ -1280,11 +1011,15 @@ if st.session_state.app_running and selected_ticker:
     
     if is_success and df_market is not None:
         raw_ticker = yf.Ticker(selected_ticker)
-        
         info = pull_institutional_profile(selected_ticker).copy()
         full_name = info.get('longName', info.get('shortName', selected_ticker))
         
-        deep_metrics = {'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 'fcf': None, 'total_liabilities': None, 'ebit': None, 'operating_cashflow': None, 'current_assets': None, 'current_liabilities': None}
+        deep_metrics = {
+            'revenue': None, 'net_income': None, 'total_assets': None, 'total_equity': None, 
+            'fcf': None, 'total_liabilities': None, 'ebit': None, 'operating_cashflow': None, 
+            'current_assets': None, 'current_liabilities': None, 'interest_expense': None,
+            'tax_provision': None, 'pretax_income': None, 'cash_and_equivalents': None, 'total_debt': None
+        }
         try:
             extracted_metrics = extract_financial_statements(raw_ticker, info)
             deep_metrics.update(extracted_metrics)
@@ -1324,89 +1059,110 @@ if st.session_state.app_running and selected_ticker:
         dividend_yield = info.get('dividendYield', 0)
         dividend_rate = info.get('dividendRate', 0)
         
+        # ------------------------------------------------------------------
+        # FUNDAMENTAL PROXY REFINEMENTS (Real Kd, Real Tax Rate, True Invested Capital)
+        # ------------------------------------------------------------------
         current_rf = 0.068 if is_indian else global_rf
         cost_of_equity = current_rf + (beta_raw * global_erp)
-        total_debt = info.get('totalDebt', 0)
-        market_cap = info.get('marketCap', 0)
-        tax_rate_proxy = 0.25 
         
-        if total_debt and market_cap and total_debt > 0:
-            total_capital = total_debt + market_cap
+        # 1. Real Effective Cost of Debt (Kd)
+        total_debt_val = float(deep_metrics.get('total_debt') or info.get('totalDebt') or 0.0)
+        interest_exp = float(deep_metrics.get('interest_expense') or 0.0)
+        if total_debt_val > 0 and interest_exp > 0:
+            raw_kd = interest_exp / total_debt_val
+            cost_of_debt = min(max(raw_kd, current_rf), 0.16) # Clamped within realistic corporate bounds
+            kd_source = "Actual (Interest Exp / Total Debt)"
+        else:
+            cost_of_debt = current_rf + 0.02
+            kd_source = "Sovereign Proxy (Rf + 2.0%)"
+
+        # 2. Real Effective Corporate Tax Rate
+        tax_prov = float(deep_metrics.get('tax_provision') or 0.0)
+        pretax_inc = float(deep_metrics.get('pretax_income') or 0.0)
+        if pretax_inc > 0 and tax_prov > 0:
+            raw_tax = tax_prov / pretax_inc
+            effective_tax_rate = min(max(raw_tax, 0.15), 0.35)
+            tax_source = "Actual (Tax Provision / Pretax Income)"
+        else:
+            effective_tax_rate = 0.25 if is_indian else 0.21
+            tax_source = "Statutory Corporate Proxy"
+
+        # 3. True Operating Invested Capital
+        total_equity_val = float(deep_metrics.get('total_equity') or 0.0)
+        total_cash_val = float(deep_metrics.get('cash_and_equivalents') or info.get('totalCash') or 0.0)
+        ta_val = float(deep_metrics.get('total_assets') or 0.0)
+        tl_val = float(deep_metrics.get('total_liabilities') or 0.0)
+        
+        if total_equity_val > 0:
+            invested_capital = total_equity_val + total_debt_val - total_cash_val
+            ic_source = "Standard Operating (Equity + Debt - Cash)"
+        elif ta_val > 0:
+            invested_capital = ta_val - (tl_val * 0.4)
+            ic_source = "Asset Proxy (Total Assets - 0.4*Liabilities)"
+        else:
+            invested_capital = 0.0
+            ic_source = "N/A"
+
+        # 4. WACC Calculation
+        market_cap = float(info.get('marketCap') or (current_price * shares) or 0.0)
+        if total_debt_val > 0 and market_cap > 0:
+            total_capital = total_debt_val + market_cap
             weight_equity = market_cap / total_capital
-            weight_debt = total_debt / total_capital
-            cost_of_debt = current_rf + 0.02 
-            calculated_wacc = (weight_equity * cost_of_equity) + (weight_debt * cost_of_debt * (1 - tax_rate_proxy))
+            weight_debt = total_debt_val / total_capital
+            calculated_wacc = (weight_equity * cost_of_equity) + (weight_debt * cost_of_debt * (1 - effective_tax_rate))
         else:
             calculated_wacc = cost_of_equity
-        
-        # Normalized Cash Flow & Share Units
-        shares_count = float(info.get('sharesOutstanding') or shares or 1.0)
-        total_cash = float(info.get('totalCash') or 0.0)
-        total_debt_val = float(info.get('totalDebt') or total_debt or 0.0)
+            weight_equity, weight_debt = 1.0, 0.0
 
-        # Baseline FCF fallback in raw currency units
+        # DCF Baseline FCF
         if raw_fcf is not None and float(raw_fcf) > 0:
             fcf_raw_base = float(raw_fcf)
         else:
-            fcf_raw_base = raw_rev * 0.18  # Normalized 18% FCF margin proxy
+            fcf_raw_base = raw_rev * 0.15  # 15% operating FCF margin proxy
 
         # DCF Scenario Builder with Enterprise-to-Equity Bridge
         pdf_dcf = {}
         if not is_financial:
-            for n, g in {"Bear Case": 0.05, "Base Case": 0.10, "Bull Case": 0.16}.items():
+            for n, g in {"Bear Case": 0.04, "Base Case": 0.08, "Bull Case": 0.14}.items():
                 discounted_cfs = [
                     (fcf_raw_base * ((1 + g) ** y)) / ((1 + calculated_wacc) ** y)
                     for y in range(1, 6)
                 ]
                 pv_fcf = sum(discounted_cfs)
-                
-                # Terminal Value calculation
                 terminal_fcf = fcf_raw_base * ((1 + g) ** 5) * (1 + 0.035)
                 terminal_denom = max(calculated_wacc - 0.035, 0.02)
                 tv = terminal_fcf / terminal_denom
                 pv_tv = tv / ((1 + calculated_wacc) ** 5)
-                
-                # Enterprise Value to Equity Value Bridge
                 enterprise_val = pv_fcf + pv_tv
-                equity_val = enterprise_val + total_cash - total_debt_val
-                
-                # Safeguard: Ensure we don't divide by zero or negative shares
-                safe_shares = max(shares_count, 1.0)
-                implied_target = equity_val / safe_shares
-                
-                pdf_dcf[n] = max(implied_target, 0.01)
+                equity_val = enterprise_val + total_cash_val - total_debt_val
+                safe_shares = max(shares, 1.0)
+                pdf_dcf[n] = max(equity_val / safe_shares, 0.01)
 
+        # DuPont Deconstruction
         ni, ta, te, rev = deep_metrics['net_income'], deep_metrics['total_assets'], deep_metrics['total_equity'], deep_metrics['revenue']
         dupont_data = {'valid': False}
         if ni and ta and te and rev and ta > 0 and te > 0 and rev > 0:
             dupont_data = {'valid': True, 'npm': (ni/rev)*100, 'ato': rev/ta, 'em': ta/te, 'roe': (ni/rev)*(rev/ta)*(ta/te)*100}
 
-        # --- Health signals (ROIC, Altman Z-Score, Piotroski F-Score) --------
-        # Computed once here (rather than deep inside their respective tabs)
-        # so both the Health tab below AND the PDF / Excel exports in the
-        # header row can share the same numbers without duplicating logic.
-        ebit_h = deep_metrics.get('ebit')
-        tl_h = deep_metrics.get('total_liabilities')
-        mkt_cap_h = info.get('marketCap')
-        ca_h = deep_metrics.get('current_assets')
-        cl_h = deep_metrics.get('current_liabilities')
-
+        # ROIC & Value Creation Spread
+        ebit_val = float(deep_metrics.get('ebit') or 0.0)
         roic, roic_wacc_spread = None, None
-        if ebit_h and ta:
-            nopat_h = ebit_h * (1 - 0.21)
-            invested_capital_h = ta - ((tl_h or 0) * 0.4)
-            if invested_capital_h > 0:
-                roic = nopat_h / invested_capital_h
-                roic_wacc_spread = roic - calculated_wacc
+        if ebit_val > 0 and invested_capital > 0:
+            nopat = ebit_val * (1 - effective_tax_rate)
+            roic = nopat / invested_capital
+            roic_wacc_spread = roic - calculated_wacc
 
+        # Altman Z-Score
         z_score, model_type, z_safe_limit, z_distress_limit = None, None, None, None
         if not is_financial:
+            ca_h = deep_metrics.get('current_assets')
+            cl_h = deep_metrics.get('current_liabilities')
             working_capital_h = (ca_h - cl_h) if ca_h and cl_h else 0
-            if ta and rev and tl_h and mkt_cap_h and ebit_h and ta > 0 and tl_h > 0:
+            if ta and rev and tl_val and market_cap and ebit_val and ta > 0 and tl_val > 0:
                 x1 = working_capital_h / ta
-                x2 = te / ta
-                x3 = ebit_h / ta
-                x4 = mkt_cap_h / tl_h
+                x2 = te / ta if te else 0.5
+                x3 = ebit_val / ta
+                x4 = market_cap / tl_val
                 if is_manufacturing:
                     x5 = rev / ta
                     z_score = (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (1.0 * x5)
@@ -1417,6 +1173,7 @@ if st.session_state.app_running and selected_ticker:
                     model_type = "Emerging Service & Tech Z''-Score"
                     z_safe_limit, z_distress_limit = 2.6, 1.1
 
+        # Piotroski F-Score Proxy
         f_score = 0
         if ni and ni > 0: f_score += 1
         if deep_metrics.get('operating_cashflow') and deep_metrics.get('operating_cashflow') > 0: f_score += 1
@@ -1425,33 +1182,25 @@ if st.session_state.app_running and selected_ticker:
 
         hist_years, hist_financials = extract_multi_year_financials(raw_ticker)
 
+        # Header Display
         col_head1, col_head2 = st.columns([3, 1])
         with col_head1:
             st.header(f"📊 {full_name} ({selected_ticker})")
             st.markdown(f"**Sector:** {info.get('sector', 'N/A') or 'N/A'} | **Industry:** {info.get('industry', 'N/A') or 'N/A'} | **Exchange:** {info.get('exchange', 'N/A') or 'N/A'}")
         with col_head2:
             st.write("")
-            if "ai_thesis_store" not in st.session_state:
-                st.session_state.ai_thesis_store = {}
-            # Reserved here (next to the header) so the button stays visually
-            # up top, but actually rendered AFTER the tabs below — see the
-            # "PDF TEAR SHEET RENDER" block at the end of the script. Every
-            # `with tab_x:` block still executes on each script run
-            # regardless of which tab is visibly selected, so by the time we
-            # reach that block, an AI Synthesis click from THIS SAME run has
-            # already landed in session_state and gets picked up immediately
-            # — no extra rerun/click needed.
+            if "ai_thesis_store" not in st.session_state: st.session_state.ai_thesis_store = {}
             pdf_slot = st.container()
 
             excel_ctx = {
                 "ticker": selected_ticker, "full_name": full_name, "sector": info.get('sector', 'N/A'),
                 "industry": info.get('industry', 'N/A'), "exchange": info.get('exchange', 'N/A'),
                 "currency": currency, "curr_sym": curr_sym, "current_price": current_price,
-                "market_cap": info.get('marketCap'), "beta": beta_raw, "pe": info.get('trailingPE'),
+                "market_cap": market_cap, "beta": beta_raw, "pe": info.get('trailingPE'),
                 "div_yield": dividend_yield, "high_52": info.get('fiftyTwoWeekHigh'),
                 "low_52": info.get('fiftyTwoWeekLow'), "shares_out": shares,
-                "rf": current_rf, "erp": global_erp, "cost_of_debt": current_rf + 0.02,
-                "tax_rate": tax_rate_proxy, "total_debt": total_debt or 0,
+                "rf": current_rf, "erp": global_erp, "cost_of_debt": cost_of_debt,
+                "tax_rate": effective_tax_rate, "total_debt": total_debt_val,
                 "fcf_base": fcf_base, "wacc": calculated_wacc, "cost_of_equity": cost_of_equity,
                 "growth_bear": 0.04, "growth_base": 0.08, "growth_bull": 0.14, "terminal_growth": 0.04,
                 "graham_number": graham_number, "dividend_rate": dividend_rate,
@@ -1482,17 +1231,14 @@ if st.session_state.app_running and selected_ticker:
                 m_col1, m_col2, m_col3, m_col4 = st.columns(4)
                 m_col1.metric("Latest Close Price", f"{curr_sym}{current_price:.2f}")
                 m_col2.metric("Trading Volume", f"{df_market['volume'].iloc[-1]:,}")
-                
-                mcap = info.get('marketCap')
-                m_col3.metric("Total Market Cap", f"{curr_sym}{mcap / 1000000000:.2f} B" if mcap else "N/A")
+                m_col3.metric("Total Market Cap", f"{curr_sym}{market_cap / 1000000000:.2f} B" if market_cap else "N/A")
                 m_col4.metric("Systematic Risk (Beta)", f"{info.get('beta', 1.0):.2f}")
                 
                 sm_col1, sm_col2, sm_col3, sm_col4 = st.columns(4)
                 short_ratio = info.get('shortRatio', 'N/A')
                 sm_col1.metric("Short Ratio (Days to Cover)", short_ratio if short_ratio else "N/A")
                 
-                high_52 = info.get('fiftyTwoWeekHigh')
-                low_52 = info.get('fiftyTwoWeekLow')
+                high_52, low_52 = info.get('fiftyTwoWeekHigh'), info.get('fiftyTwoWeekLow')
                 dist_to_high = ((current_price - high_52) / high_52) * 100 if high_52 and high_52 > 0 else 0
                 dist_to_low = ((current_price - low_52) / low_52) * 100 if low_52 and low_52 > 0 else 0
                 
@@ -1532,7 +1278,7 @@ if st.session_state.app_running and selected_ticker:
         with tab_comps:
             st.subheader("Relative Valuation Matrix")
             resolved_peers = []
-            with st.spinner("Resolving peer identities..."):
+            with st.spinner("Resolving industry peer cohort..."):
                 for raw_p in [p.strip() for p in peer_input.split(",") if p.strip()]:
                     p_cands = search_asset_candidates(raw_p)
                     if p_cands and p_cands[0]['symbol'] not in resolved_peers and p_cands[0]['symbol'] != selected_ticker:
@@ -1543,16 +1289,35 @@ if st.session_state.app_running and selected_ticker:
             for t in all_tickers_to_compare:
                 try:
                     p_info = pull_institutional_profile(t)
-                    comps_data.append({"Ticker": t, "Company Name": p_info.get('shortName', t), "P/E Ratio": p_info.get('trailingPE', None), "EV/EBITDA": p_info.get('enterpriseToEbitda', None), "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None})
+                    comps_data.append({"Ticker": t, "Company Name": p_info.get('shortName', t), 
+                                       "P/E Ratio": p_info.get('trailingPE', None), 
+                                       "EV/EBITDA": p_info.get('enterpriseToEbitda', None), 
+                                       "Net Margin (%)": p_info.get('profitMargins', 0) * 100 if p_info.get('profitMargins') else None})
                 except: pass
             
             if comps_data:
                 df_comps = pd.DataFrame(comps_data)
+                
+                # Contextual Valuation Cards (Target Multiple vs Peer Benchmarks)
+                target_pe = df_comps.loc[df_comps['Ticker'] == selected_ticker, 'P/E Ratio'].values[0]
+                peer_pes = df_comps.loc[df_comps['Ticker'] != selected_ticker, 'P/E Ratio'].dropna()
+                if len(peer_pes) > 0 and pd_notna(target_pe):
+                    peer_avg_pe = peer_pes.mean()
+                    pe_diff = ((target_pe - peer_avg_pe) / peer_avg_pe) * 100
+                    c_col1, c_col2, c_col3 = st.columns(3)
+                    c_col1.metric("Target P/E Ratio", f"{target_pe:.2f}x")
+                    c_col2.metric("Industry Peer Average P/E", f"{peer_avg_pe:.2f}x")
+                    if pe_diff > 0:
+                        c_col3.metric("Valuation Spread vs. Peers", f"+{pe_diff:.1f}% Premium", delta=f"{pe_diff:.1f}%", delta_color="inverse")
+                    else:
+                        c_col3.metric("Valuation Spread vs. Peers", f"{pe_diff:.1f}% Discount", delta=f"{pe_diff:.1f}%", delta_color="normal")
+                
                 clean_scatter = df_comps.dropna(subset=['P/E Ratio', 'Net Margin (%)', 'EV/EBITDA']).copy()
                 clean_scatter = clean_scatter[clean_scatter['EV/EBITDA'] > 0]
                 
                 if not clean_scatter.empty:
-                    fig_scatter = px.scatter(clean_scatter, x="P/E Ratio", y="Net Margin (%)", text="Ticker", size="EV/EBITDA", color="Ticker", title="Peer Positioning Scatter (Bubble Size = EV/EBITDA)")
+                    fig_scatter = px.scatter(clean_scatter, x="P/E Ratio", y="Net Margin (%)", text="Ticker", 
+                                             size="EV/EBITDA", color="Ticker", title="Peer Positioning Scatter (Bubble Size = EV/EBITDA)")
                     fig_scatter.update_traces(textposition='top center')
                     fig_scatter.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig_scatter, use_container_width=True)
@@ -1590,13 +1355,8 @@ if st.session_state.app_running and selected_ticker:
             st.metric("Acquirer's Multiple (Earnings Yield)", f"{earnings_yield:.2f}%", help="EBIT / Enterprise Value. Metric used by private equity to find cash-cow targets.")
             
             st.markdown("#### Piotroski F-Score (Proxy Metric)")
-            f_score = 0
-            if ni and ni > 0: f_score += 1
-            if deep_metrics.get('operating_cashflow') and deep_metrics.get('operating_cashflow') > 0: f_score += 1
-            if deep_metrics.get('operating_cashflow') and ni and deep_metrics.get('operating_cashflow') > ni: f_score += 1
-            if info.get('returnOnAssets') and info.get('returnOnAssets') > 0: f_score += 1
             st.progress(f_score / 4)
-            st.caption(f"Estimated Score: {f_score} / 4 (Based on available yfinance API fundamentals: Net Income, OCF, OCF > NI, ROA. Excludes leverage and margin trends due to API limits.)")
+            st.caption(f"Estimated Score: {f_score} / 4 (Based on Net Income, OCF, OCF > NI, and ROA signals.)")
 
         with tab_dcf:
             st.subheader("Valuation Architecture Deck")
@@ -1615,42 +1375,70 @@ if st.session_state.app_running and selected_ticker:
                 else:
                     st.info("Asset does not distribute active dividends. Utilize Excess Returns framework offline.")
             else:
-                st.markdown("#### Capital Asset Pricing Model & WACC")
-                st.caption(f"**Cost of Equity (Ke):** Risk-Free Rate ({current_rf*100:.2f}%) + Beta ({beta_raw}) * ERP ({global_erp*100:.2f}%) = **{cost_of_equity*100:.2f}%**")
-                if total_debt and total_debt > 0:
-                    st.caption(f"**True WACC:** {calculated_wacc*100:.2f}% (Weighted Equity & Debt Structure)")
-                else:
-                    st.caption(f"**True WACC:** {calculated_wacc*100:.2f}% (No debt detected, WACC defaults to Ke)")
+                st.markdown("#### Capital Asset Pricing Model & Dynamic Cost of Capital")
+                w_col1, w_col2, w_col3 = st.columns(3)
+                w_col1.metric("Cost of Equity (Ke)", f"{cost_of_equity*100:.2f}%", help=f"Rf ({current_rf*100:.2f}%) + Beta ({beta_raw:.2f}) * ERP ({global_erp*100:.2f}%)")
+                w_col2.metric("Effective Cost of Debt (Kd)", f"{cost_of_debt*100:.2f}%", help=f"Source: {kd_source}")
+                w_col3.metric("True Blended WACC", f"{calculated_wacc*100:.2f}%", help=f"Tax Rate: {effective_tax_rate*100:.1f}% ({tax_source}) | Equity Weight: {weight_equity*100:.1f}%")
+                
+                st.markdown("---")
+                st.markdown("#### Multi-Stage Free Cash Flow Modeler (Fade / H-Model Architecture)")
+                dcf_mode = st.radio("Valuation Growth Engine Mode:", ["Multi-Stage Fade (H-Model Growth)", "Constant Growth Rate"], horizontal=True)
                 
                 dcf_col1, dcf_col2, dcf_col3 = st.columns(3)
                 ui_fcf = dcf_col1.number_input("Base FCF Override (Millions)", value=float(fcf_base), step=10.0)
-                
                 if ui_fcf <= 0:
-                    st.caption("⚠️ **Negative Base FCF Detected:** Normalizing baseline via operational revenue-proxy model to prevent compounding loss projections.")
-                    ui_fcf = float(raw_rev * 0.10) / 1000000.0
+                    st.caption("⚠️ Negative reported FCF detected. Normalizing baseline via 12% operating revenue proxy.")
+                    ui_fcf = float(raw_rev * 0.12) / 1000000.0
                 
                 default_wacc_ui = min(max(float(calculated_wacc*100), 5.0), 30.0)
                 ui_wacc = dcf_col2.slider("Discount Rate (WACC %)", 5.0, 30.0, default_wacc_ui, 0.5) / 100
                 ui_t_growth = dcf_col3.slider("Terminal Growth Rate (%)", 1.0, 8.0, 4.0, 0.5) / 100
                 
                 ui_dcf_results = {}
-                for n, g in {"Bear Case": 0.04, "Base Case": 0.08, "Bull Case": 0.14}.items():
-                    cfs = [ui_fcf * ((1 + g) ** y) for y in range(1, 6)]
-                    pv = sum([cfs[t] / ((1 + ui_wacc) ** (t + 1)) for t in range(5)])
-                    tv = (cfs[-1] * (1 + ui_t_growth)) / (ui_wacc - ui_t_growth)
-                    ui_dcf_results[n] = (pv + (tv / ((1 + ui_wacc) ** 5))) / shares_for_calc
-
-                st.plotly_chart(px.bar(pd.DataFrame(list(ui_dcf_results.items()), columns=["Scenario", "Target Price"]), x="Scenario", y="Target Price", text_auto=".2f", color="Scenario", color_discrete_map={"Bear Case": "#ef4444", "Base Case": "#3b82f6", "Bull Case": "#10b981"}), use_container_width=True)
+                scenario_configs = {
+                    "Bear Case": {"initial_g": 0.04, "color": "#ef4444"},
+                    "Base Case": {"initial_g": 0.08, "color": "#3b82f6"},
+                    "Bull Case": {"initial_g": 0.14, "color": "#10b981"}
+                }
                 
-                st.markdown("#### Reverse DCF (Market Implied Growth)")
+                for sc, conf in scenario_configs.items():
+                    init_g = conf["initial_g"]
+                    if dcf_mode == "Multi-Stage Fade (H-Model Growth)":
+                        # Years 1-2: High growth; Years 3-5: Linear fade toward terminal rate
+                        g_schedule = [
+                            init_g, 
+                            init_g, 
+                            init_g - (init_g - ui_t_growth) * 0.33, 
+                            init_g - (init_g - ui_t_growth) * 0.66, 
+                            ui_t_growth + 0.005
+                        ]
+                    else:
+                        g_schedule = [init_g] * 5
+                    
+                    # Project compounding FCFs along schedule
+                    cfs = []
+                    curr_cf = ui_fcf
+                    for yr_g in g_schedule:
+                        curr_cf *= (1 + yr_g)
+                        cfs.append(curr_cf)
+                        
+                    pv = sum([cfs[t] / ((1 + ui_wacc) ** (t + 1)) for t in range(5)])
+                    tv = (cfs[-1] * (1 + ui_t_growth)) / max(ui_wacc - ui_t_growth, 0.015)
+                    ui_dcf_results[sc] = (pv + (tv / ((1 + ui_wacc) ** 5))) / shares_for_calc
+
+                st.plotly_chart(px.bar(pd.DataFrame(list(ui_dcf_results.items()), columns=["Scenario", "Target Price"]), 
+                                       x="Scenario", y="Target Price", text_auto=".2f", color="Scenario", 
+                                       color_discrete_map={"Bear Case": "#ef4444", "Base Case": "#3b82f6", "Bull Case": "#10b981"}), use_container_width=True)
+                
+                st.markdown("#### Reverse DCF (Market Implied Growth Rate)")
                 implied_g_range = np.linspace(-0.10, 0.30, 400)
-                closest_diff = float('inf')
-                implied_g_ans = 0
+                closest_diff, implied_g_ans = float('inf'), 0
                 for test_g in implied_g_range:
                     if ui_wacc > test_g:
                         cfs = [ui_fcf * ((1 + test_g) ** y) for y in range(1, 6)]
                         pv = sum([cfs[t] / ((1 + ui_wacc) ** (t + 1)) for t in range(5)])
-                        tv = (cfs[-1] * (1 + test_g)) / (ui_wacc - test_g)
+                        tv = (cfs[-1] * (1 + test_g)) / max(ui_wacc - test_g, 0.015)
                         test_price = (pv + (tv / ((1 + ui_wacc) ** 5))) / shares_for_calc
                         if abs(test_price - current_price) < closest_diff:
                             closest_diff = abs(test_price - current_price)
@@ -1665,82 +1453,63 @@ if st.session_state.app_running and selected_ticker:
                     for j, t in enumerate(tg_range):
                         cfs = [ui_fcf * ((1 + 0.08) ** y) for y in range(1, 6)]
                         pv = sum([cfs[year] / ((1 + w) ** (year + 1)) for year in range(5)])
-                        tv = (cfs[-1] * (1 + t)) / (w - t) if w > t else 0
+                        tv = (cfs[-1] * (1 + t)) / max(w - t, 0.015)
                         matrix[i, j] = (pv + (tv / ((1 + w) ** 5))) / shares_for_calc
-                fig_heat = px.imshow(matrix, labels=dict(x="Terminal Growth Rate", y="Discount Rate (WACC)", color="Implied Price"), x=[f"{x*100:.1f}%" for x in tg_range], y=[f"{y*100:.1f}%" for y in wacc_range], text_auto=".2f", color_continuous_scale="RdYlGn")
+                fig_heat = px.imshow(matrix, labels=dict(x="Terminal Growth Rate", y="Discount Rate (WACC)", color="Implied Price"), 
+                                     x=[f"{x*100:.1f}%" for x in tg_range], y=[f"{y*100:.1f}%" for y in wacc_range], 
+                                     text_auto=".2f", color_continuous_scale="RdYlGn")
                 st.plotly_chart(fig_heat, use_container_width=True)
 
         with tab_health:
             st.subheader("🏛️ Corporate Health & Forensics")
-            
             st.markdown("#### Value Creation Engine (ROIC vs. Cost of Capital)")
-            st.caption("Note: Invested Capital is approximated as (Total Assets - 0.4 * Total Liabilities) due to transient API limitations on specific operating liabilities.")
-            tax_rate_proxy = 0.21
-            if ebit and ta:
-                nopat = ebit * (1 - tax_rate_proxy)
-                invested_capital = ta - (deep_metrics.get('total_liabilities', 0) * 0.4) 
-                roic = nopat / invested_capital if invested_capital > 0 else 0
+            st.caption(f"**Invested Capital Architecture:** {ic_source} | Effective Tax Rate: {effective_tax_rate*100:.1f}%")
+            
+            if ebit_val > 0 and invested_capital > 0:
+                nopat = ebit_val * (1 - effective_tax_rate)
+                roic = nopat / invested_capital
                 roic_wacc_spread = roic - calculated_wacc
                 
                 r_col1, r_col2 = st.columns([1, 2])
                 r_col1.metric("Return on Invested Capital (ROIC)", f"{roic*100:.2f}%")
-                if roic_wacc_spread > 0: r_col2.success(f"✅ **Value Creator:** ROIC exceeds WACC by {roic_wacc_spread*100:.2f}%.")
-                else: r_col2.error(f"🚨 **Value Destroyer:** ROIC is below WACC by {abs(roic_wacc_spread)*100:.2f}%.")
+                if roic_wacc_spread > 0: 
+                    r_col2.success(f"✅ **Value Creator:** ROIC exceeds WACC by {roic_wacc_spread*100:.2f}%. True economic value created.")
+                else: 
+                    r_col2.error(f"🚨 **Value Destroyer:** ROIC is below WACC by {abs(roic_wacc_spread)*100:.2f}%. Cost of capital exceeds return.")
 
             st.markdown("#### Altman Z-Score (Bankruptcy Probability Model)")
             if is_financial:
                 st.info("Altman Z-Score analysis bypassed. Model metrics are incompatible with banking leverage profiles.")
+            elif z_score is not None:
+                z_col1, z_col2 = st.columns([1, 2])
+                z_col1.metric(f"{model_type}", f"{z_score:.2f}")
+                if z_score >= z_safe_limit: 
+                    z_col2.success("✅ **Safe Zone:** Structural insolvency risk is mathematically remote.")
+                elif z_distress_limit <= z_score < z_safe_limit: 
+                    z_col2.warning("⚠️ **Grey Zone:** Structural friction detected. Monitor capitalization trends closely.")
+                else: 
+                    z_col2.error("🚨 **Distress Zone:** High profile vulnerability. Restructuring indicators present.")
             else:
-                tl, mkt_cap = deep_metrics.get('total_liabilities'), info.get('marketCap')
-                ca = deep_metrics.get('current_assets')
-                cl = deep_metrics.get('current_liabilities')
-                working_capital = (ca - cl) if ca and cl else 0
-                
-                if ta and rev and tl and mkt_cap and ebit and ta > 0 and tl > 0:
-                    x1 = working_capital / ta 
-                    x2 = te / ta
-                    x3 = ebit / ta
-                    x4 = mkt_cap / tl
-                    
-                    if is_manufacturing:
-                        x5 = rev / ta
-                        z_score = (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (1.0 * x5)
-                        model_type = "Classic Manufacturing Z-Score"
-                        safe_limit, distress_limit = 3.0, 1.8
-                    else:
-                        z_score = (6.56 * x1) + (3.26 * x2) + (6.72 * x3) + (1.05 * x4)
-                        model_type = "Emerging Service & Tech Z''-Score"
-                        safe_limit, distress_limit = 2.6, 1.1
-
-                    z_col1, z_col2 = st.columns([1, 2])
-                    z_col1.metric(f"{model_type}", f"{z_score:.2f}")
-                    if z_score >= safe_limit: 
-                        z_col2.success("✅ **Safe Zone:** Structural insolvency risk is mathematically remote.")
-                    elif distress_limit <= z_score < safe_limit: 
-                        z_col2.warning("⚠️ **Grey Zone:** Structural friction detected. Monitor capitalization trends closely.")
-                    else: 
-                        z_col2.error("🚨 **Distress Zone:** High profile vulnerability. Restructuring indicators present.")
-                else: st.info("Insufficient deep balance sheet data to calculate Altman Z-Score.")
+                st.info("Insufficient deep balance sheet data to calculate Altman Z-Score.")
             
             st.markdown("---")
             if dupont_data['valid']:
+                st.markdown("#### 3-Stage DuPont ROE Decomposition")
                 dp1, dp2, dp3, dp4 = st.columns(4)
-                dp1.metric("Net Profit Margin", f"{dupont_data['npm']:.2f}%")
-                dp2.metric("Asset Turnover", f"{dupont_data['ato']:.2f}x")
-                dp3.metric("Equity Multiplier", f"{dupont_data['em']:.2f}x")
-                dp4.metric("Deconstructed ROE", f"{dupont_data['roe']:.2f}%")
+                dp1.metric("Net Profit Margin", f"{dupont_data['npm']:.2f}%", help="Operational Margin Efficiency")
+                dp2.metric("Asset Turnover", f"{dupont_data['ato']:.2f}x", help="Asset Utilization Efficiency")
+                dp3.metric("Equity Multiplier", f"{dupont_data['em']:.2f}x", help="Financial Leverage Multiplier")
+                dp4.metric("Deconstructed ROE", f"{dupont_data['roe']:.2f}%", help="NPM * ATO * EM")
 
         with tab_mpt:
             st.subheader("Modern Portfolio Theory (MPT) Optimization")
             if len(all_tickers_to_compare) >= 2:
-                with st.spinner("Running SLSQP Constrained Optimization..."):
+                with st.spinner("Running SLSQP Constrained Optimization over Peer Cohort..."):
                     mpt_data = pull_peer_action(all_tickers_to_compare, time_horizon)
                     if not mpt_data.empty and isinstance(mpt_data, pd.DataFrame):
-                        
                         mpt_data = mpt_data.ffill().bfill()
                         weekly_data = mpt_data.resample('W').last()
                         ret = weekly_data.pct_change().dropna()
-                        
                         valid_tickers = list(ret.columns)
                         num_assets = len(valid_tickers)
                         
@@ -1765,7 +1534,8 @@ if st.session_state.app_running and selected_ticker:
                             bounds = tuple((0.0, 1.0) for _ in range(num_assets))
                             init_guess = [1.0 / num_assets] * num_assets
                             
-                            opt_res = sco.minimize(negative_sharpe, init_guess, args=(ann_ret, cov_matrix, current_rf), method='SLSQP', bounds=bounds, constraints=constraints)
+                            opt_res = sco.minimize(negative_sharpe, init_guess, args=(ann_ret, cov_matrix, current_rf), 
+                                                   method='SLSQP', bounds=bounds, constraints=constraints)
                             opt_weights = opt_res.x
                             opt_ret, opt_std = portfolio_performance(opt_weights, ann_ret, cov_matrix)
                             max_sharpe = (opt_ret - current_rf) / opt_std
@@ -1783,7 +1553,8 @@ if st.session_state.app_running and selected_ticker:
                                 res[2,i] = (p_ret - current_rf) / p_std 
                                 
                             st.markdown("#### Efficient Frontier (SLSQP Global Maximum)")
-                            fig_mpt = px.scatter(x=res[1,:], y=res[0,:], color=res[2,:], labels={'x': 'Risk', 'y': 'Return', 'color': 'Sharpe'}, title="Efficient Frontier Simulation")
+                            fig_mpt = px.scatter(x=res[1,:], y=res[0,:], color=res[2,:], 
+                                                 labels={'x': 'Risk', 'y': 'Return', 'color': 'Sharpe'}, title="Efficient Frontier Simulation")
                             fig_mpt.add_trace(go.Scatter(x=[opt_std], y=[opt_ret], mode='markers', marker=dict(color='red', size=18, symbol='star'), name='SLSQP Optimal'))
                             fig_mpt.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                             st.plotly_chart(fig_mpt, use_container_width=True)
@@ -1798,10 +1569,8 @@ if st.session_state.app_running and selected_ticker:
                             st.plotly_chart(fig_pie, use_container_width=True)
                             st.dataframe(pd.DataFrame(alloc_data).style.format({"Weight": "{:.2%}", "Capital": f"{curr_sym}"+"{:,.2f}"}), use_container_width=True)
                         else:
-                            st.warning("Data mismatch: Cross-exchange market holidays wiped out overlapping historical data.")
-                    else:
-                        st.warning("Failed to fetch adequate peer history for optimization.")
-            else: st.warning("Add Custom Peers to run Portfolio Optimization.")
+                            st.warning("Insufficient overlapping historical data across the peer group.")
+            else: st.warning("Add peers to run Portfolio Optimization.")
 
         with tab_ml:
             st.subheader(f"🤖 Machine Learning Price Forecast ({selected_ticker})")
@@ -1831,8 +1600,7 @@ if st.session_state.app_running and selected_ticker:
                 
                 fig_ml.update_layout(title=f"30-Day ML Monte Carlo Forecast Envelope ({selected_ticker})", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', xaxis_title="Days into Future", yaxis_title=f"Projected Price ({currency})")
                 st.plotly_chart(fig_ml, use_container_width=True)
-            else: st.warning("Insufficient historical data to run ML simulations.")
-            
+
         with tab_bs:
             st.subheader(f"Institutional Options Desk ({selected_ticker})")
             st.markdown("#### Live Volatility Skew & Put/Call Ratio (PCR)")
@@ -1841,7 +1609,6 @@ if st.session_state.app_running and selected_ticker:
                 if expirations:
                     chain = raw_ticker.option_chain(expirations[0])
                     live_calls, live_puts = chain.calls, chain.puts
-                    
                     total_call_vol = live_calls['volume'].sum() if 'volume' in live_calls.columns else 1
                     total_put_vol = live_puts['volume'].sum() if 'volume' in live_puts.columns else 0
                     pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 0
@@ -1871,38 +1638,20 @@ if st.session_state.app_running and selected_ticker:
             d2 = d1 - sigma * np.sqrt(T)
             call_price = current_price * si.norm.cdf(d1, 0.0, 1.0) - K * np.exp(-r * T) * si.norm.cdf(d2, 0.0, 1.0)
             put_price = K * np.exp(-r * T) * si.norm.cdf(-d2, 0.0, 1.0) - current_price * si.norm.cdf(-d1, 0.0, 1.0)
-            
             call_delta = si.norm.cdf(d1, 0.0, 1.0)
-            put_delta = call_delta - 1
             gamma = si.norm.pdf(d1, 0.0, 1.0) / (current_price * sigma * np.sqrt(T))
             vega = current_price * si.norm.pdf(d1, 0.0, 1.0) * np.sqrt(T) / 100
             call_theta = (-current_price * si.norm.pdf(d1, 0.0, 1.0) * sigma / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * si.norm.cdf(d2, 0.0, 1.0)) / 365
-            prob_itm_call = si.norm.cdf(d2, 0.0, 1.0) * 100
             
-            st.markdown("---")
-            call_col, put_col, prob_col = st.columns(3)
-            call_col.metric(label="Call Premium (Right to Buy)", value=f"{curr_sym}{call_price:.2f}")
-            put_col.metric(label="Put Premium (Right to Sell)", value=f"{curr_sym}{put_price:.2f}")
-            prob_col.metric(label="Probability of Call ITM", value=f"{prob_itm_call:.1f}%")
+            call_col, put_col = st.columns(2)
+            call_col.metric("Theoretical Call Premium", f"{curr_sym}{call_price:.2f}")
+            put_col.metric("Theoretical Put Premium", f"{curr_sym}{put_price:.2f}")
             
-            st.markdown("#### The Greeks (Risk Matrix)")
             g_col1, g_col2, g_col3, g_col4 = st.columns(4)
             g_col1.metric("Delta (Call)", f"{call_delta:.3f}")
             g_col2.metric("Gamma", f"{gamma:.4f}")
             g_col3.metric("Theta (Daily Decay)", f"{curr_sym}{call_theta:.3f}")
             g_col4.metric("Vega", f"{curr_sym}{vega:.3f}")
-
-            st.markdown("##### Pricing Sensitivity Curve (Option Value vs. Underlying Price)")
-            sim_prices = np.linspace(current_price * 0.5, current_price * 1.5, 100)
-            sim_d1 = (np.log(sim_prices / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-            sim_d2 = sim_d1 - sigma * np.sqrt(T)
-            sim_calls = sim_prices * si.norm.cdf(sim_d1, 0.0, 1.0) - K * np.exp(-r * T) * si.norm.cdf(sim_d2, 0.0, 1.0)
-            sim_puts = K * np.exp(-r * T) * si.norm.cdf(-sim_d2, 0.0, 1.0) - sim_prices * si.norm.cdf(-sim_d1, 0.0, 1.0)
-            
-            fig_bs = px.line(pd.DataFrame({"Price": sim_prices, "Call": sim_calls, "Put": sim_puts}), x="Price", y=["Call", "Put"], title=f"Theoretical Option Premium vs. Asset Price ({selected_ticker})", color_discrete_sequence=['#10b981', '#ef4444'])
-            fig_bs.add_vline(x=current_price, line_dash="dash", line_color="gray", annotation_text="Current Price")
-            fig_bs.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', xaxis_title="Underlying Asset Price", yaxis_title="Option Premium")
-            st.plotly_chart(fig_bs, use_container_width=True)
 
         with tab_tech:
             st.subheader(f"Quantitative Trading Desk: Microstructure & Algos ({selected_ticker})")
@@ -1942,31 +1691,8 @@ if st.session_state.app_running and selected_ticker:
                 fig_bb.add_trace(go.Scatter(x=tech_df['date'], y=tech_df['close_price'], name='Close Price', line=dict(color='#3b82f6', width=2)))
                 fig_bb.add_trace(go.Scatter(x=tech_df['date'], y=tech_df['BB_Upper'], name='Upper Band', line=dict(color='#ef4444', width=1, dash='dot')))
                 fig_bb.add_trace(go.Scatter(x=tech_df['date'], y=tech_df['BB_Lower'], name='Lower Band', line=dict(color='#10b981', width=1, dash='dot')))
-                
-                max_p, min_p = tech_df['close_price'].max(), tech_df['close_price'].min()
-                diff = max_p - min_p
-                levels = [max_p, max_p - diff*0.236, max_p - diff*0.382, max_p - diff*0.5, max_p - diff*0.618, min_p]
-                colors = ['#94a3b8', '#a855f7', '#3b82f6', '#10b981', '#f59e0b', '#94a3b8']
-                for lvl, col in zip(levels, colors):
-                    fig_bb.add_hline(y=lvl, line_dash="dot", line_color=col, opacity=0.5)
-                
-                fig_bb.update_layout(title=f"Volatility Channels & Fibonacci Retracements ({selected_ticker})", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                fig_bb.update_layout(title=f"Volatility Channels ({selected_ticker})", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_bb, use_container_width=True)
-                
-                osc_col1, osc_col2 = st.columns(2)
-                with osc_col1:
-                    fig_rsi = px.line(tech_df, x='date', y='RSI', title=f"Relative Strength Index ({selected_ticker})")
-                    fig_rsi.add_hline(y=70, line_dash="dash", line_color="#ef4444")
-                    fig_rsi.add_hline(y=30, line_dash="dash", line_color="#10b981")
-                    fig_rsi.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig_rsi, use_container_width=True)
-                with osc_col2:
-                    fig_macd = go.Figure()
-                    fig_macd.add_trace(go.Scatter(x=tech_df['date'], y=tech_df['MACD'], name='MACD', line=dict(color='#3b82f6')))
-                    fig_macd.add_trace(go.Scatter(x=tech_df['date'], y=tech_df['Signal_Line'], name='Signal', line=dict(color='#ef4444')))
-                    fig_macd.add_trace(go.Bar(x=tech_df['date'], y=tech_df['MACD_Histogram'], name='Histogram', marker_color='#94a3b8'))
-                    fig_macd.update_layout(title=f"MACD Momentum Trend ({selected_ticker})", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig_macd, use_container_width=True)
 
         with tab_season:
             st.subheader(f"📅 Quantitative Seasonality & Regime Tracking ({selected_ticker})")
@@ -1984,13 +1710,6 @@ if st.session_state.app_running and selected_ticker:
                 fig_season = px.imshow(pivot_season, text_auto=".1f", color_continuous_scale="RdYlGn", title=f"Historical Monthly Return Heatmap (%)")
                 fig_season.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_season, use_container_width=True)
-                
-                st.markdown("#### Average Monthly Performance Matrix")
-                avg_monthly = pivot_season.mean().reset_index()
-                avg_monthly.columns = ['Month', 'Average Return %']
-                fig_bar_season = px.bar(avg_monthly, x='Month', y='Average Return %', title=f"Average Return by Month ({selected_ticker})", color='Average Return %', color_continuous_scale="RdYlGn")
-                fig_bar_season.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig_bar_season, use_container_width=True)
 
         with tab_risk:
             st.subheader(f"Institutional Risk Engine: Value at Risk (VaR) & Expected Shortfall ({selected_ticker})")
@@ -2011,24 +1730,23 @@ if st.session_state.app_running and selected_ticker:
                 r_col2.metric("Conditional VaR (Expected Shortfall)", f"{cvar_95 * 100:.2f}%")
                 r_col3.metric("Max Historical Drawdown", f"{max_drawdown * 100:.2f}%")
                 
-                fig_var = px.histogram(risk_df, x='Daily Return', nbins=50, title="Empirical Return Distribution", color_discrete_sequence=['#3b82f6'])
-                fig_var.add_vline(x=var_95, line_dash="dash", line_color="#ef4444", annotation_text="95% VaR")
-                fig_var.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', xaxis_tickformat='.2%')
-                st.plotly_chart(fig_var, use_container_width=True)
-                
                 fig_dd = px.area(risk_df, x='date', y='Drawdown', title="Underwater Curve (Drawdown Profile)", color_discrete_sequence=['#ef4444'])
                 fig_dd.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', yaxis_tickformat='.2%')
                 st.plotly_chart(fig_dd, use_container_width=True)
 
+        # ------------------------------------------------------------------
+        # TAB 12: STATISTICAL ARBITRAGE WITH COINTEGRATION & ADF TESTING
+        # ------------------------------------------------------------------
         with tab_arb:
-            st.subheader("🎭 Statistical Arbitrage (Pairs Trading Spread)")
+            st.subheader("🎭 Statistical Arbitrage & Cointegration Desk")
             default_peer = resolve_automatic_peer(selected_ticker, info.get('sector', ''), info.get('industry', ''))
             arb_ui_col1, arb_ui_col2 = st.columns([1, 2])
             with arb_ui_col1:
-                arb_pair = st.text_input("📊 Target Arbitrage Counter-Pair Ticker:", value=default_peer, help="Automatically mapped based on sector symmetry. Override manually as needed.")
+                arb_pair = st.text_input("📊 Target Arbitrage Counter-Pair Ticker:", value=default_peer, 
+                                         help="Automatically mapped based on sector symmetry. Override manually as needed.")
             
             if arb_pair:
-                with st.spinner(f"Pulling dynamic arbitrage spread analytics for {arb_pair}..."):
+                with st.spinner(f"Pulling dynamic arbitrage spread and cointegration analytics for {arb_pair}..."):
                     try:
                         arb_data = pull_peer_action([arb_pair.strip()], time_horizon)
                         if not arb_data.empty:
@@ -2037,18 +1755,46 @@ if st.session_state.app_running and selected_ticker:
                             arb_df['date'] = pd.to_datetime(arb_df['date']).dt.tz_localize(None)
                             
                             pair_df = pd.merge(df_market[['date', 'close_price']], arb_df, on='date', how='inner')
-                            if not pair_df.empty:
-                                pair_df['Spread_Ratio'] = pair_df['close_price'] / pair_df['arb_close']
-                                rolling_mean = pair_df['Spread_Ratio'].rolling(window=20).mean()
-                                rolling_std = pair_df['Spread_Ratio'].rolling(window=20).std()
-                                pair_df['Z_Score'] = (pair_df['Spread_Ratio'] - rolling_mean) / rolling_std
+                            if not pair_df.empty and len(pair_df) > 20:
+                                p1 = pair_df['close_price'].values
+                                p2 = pair_df['arb_close'].values
+                                
+                                # 1. OLS Hedge Ratio Beta & Spread Residuals
+                                cov_12 = np.cov(p1, p2)[0, 1]
+                                var_2 = np.var(p2)
+                                hedge_ratio = cov_12 / var_2 if var_2 > 0 else 1.0
+                                alpha = np.mean(p1) - hedge_ratio * np.mean(p2)
+                                spread_residuals = p1 - (alpha + hedge_ratio * p2)
+                                pair_df['Hedged_Spread'] = spread_residuals
+                                
+                                # 2. Augmented Dickey-Fuller Cointegration Test
+                                t_stat, p_val, is_coint = run_adf_stationarity_test(spread_residuals)
+                                
+                                # Display Cointegration Diagnostics
+                                c1, c2, c3 = st.columns(3)
+                                c1.metric("Optimal OLS Hedge Ratio (β)", f"{hedge_ratio:.3f}", help="Hedge Ratio: Buy 1 share of Target, Short β shares of Pair.")
+                                c2.metric("ADF Test Statistic (t)", f"{t_stat:.2f}", help="MacKinnon 5% Critical Value is -2.86. Value must be more negative to confirm mean-reversion.")
+                                if is_coint:
+                                    c3.success(f"✅ **Cointegrated** (p = {p_val:.3f}) — Stationary Mean-Reverting Spread.")
+                                else:
+                                    c3.warning(f"⚠️ **Non-Cointegrated** (p = {p_val:.3f}) — Spurious Spread / Random Walk.")
+                                
+                                # 3. Standardized Rolling Z-Score on Hedged Residual Spread
+                                roll_mean = pair_df['Hedged_Spread'].rolling(window=20).mean()
+                                roll_std = pair_df['Hedged_Spread'].rolling(window=20).std()
+                                pair_df['Z_Score'] = (pair_df['Hedged_Spread'] - roll_mean) / (roll_std + 1e-8)
                                 pair_df = pair_df.dropna()
                                 
-                                fig_arb = px.line(pair_df, x='date', y='Z_Score', title=f"Spread Z-Score: {selected_ticker} vs {arb_pair.strip()}", color_discrete_sequence=['#a855f7'])
-                                fig_arb.add_hline(y=2.0, line_dash="dash", line_color="#ef4444", annotation_text="Sell Target / Buy Pair Spread Threshold")
-                                fig_arb.add_hline(y=-2.0, line_dash="dash", line_color="#10b981", annotation_text="Buy Target / Sell Pair Spread Threshold")
+                                fig_arb = px.line(pair_df, x='date', y='Z_Score', 
+                                                  title=f"Cointegrated Spread Z-Score: {selected_ticker} vs. {arb_pair.strip()} (β={hedge_ratio:.3f})", 
+                                                  color_discrete_sequence=['#a855f7'])
+                                fig_arb.add_hline(y=2.0, line_dash="dash", line_color="#ef4444", annotation_text="Sell Target / Buy Pair Spread Threshold (+2.0σ)")
+                                fig_arb.add_hline(y=-2.0, line_dash="dash", line_color="#10b981", annotation_text="Buy Target / Sell Pair Spread Threshold (-2.0σ)")
+                                fig_arb.add_hline(y=0.0, line_dash="dot", line_color="#94a3b8", annotation_text="Mean Reversion Equilibrium")
                                 fig_arb.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                                 st.plotly_chart(fig_arb, use_container_width=True)
+                            else:
+                                st.warning("Insufficient overlapping trading history to establish cointegration.")
                         else:
                             st.warning("Selected pair returned empty historical dataframe.")
                     except Exception as e: 
@@ -2076,7 +1822,6 @@ if st.session_state.app_running and selected_ticker:
             if not has_insider_data:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.info("⚠️ SEC/SEBI Filing Data Currently Unavailable via Open-Source Feeds.")
-                st.markdown("> **Operational Note:** Public regulatory registries for this asset require dedicated market data connections. In institutional installations, swapping the exchange engine from open-source to corporate lines (e.g., Bloomberg B-Pipe) immediately populates this module.")
 
         with tab_macro:
             st.subheader("🌐 Global Macroeconomic Regime")
@@ -2136,15 +1881,15 @@ if st.session_state.app_running and selected_ticker:
                 v_roic = f"{roic_wacc_spread*100:.2f}%" if roic_wacc_spread is not None else "N/A"
                 v_rsi = f"{tech_df['RSI'].iloc[-1]:.2f}" if 'tech_df' in locals() and not tech_df.empty and 'RSI' in tech_df.columns else "N/A"
 
-                metrics_summary = f"""
-                - Current Price: {v_price}
-                - DCF Base Case Implied Value: {v_dcf}
-                - Cost of Capital / WACC: {v_wacc}
-                - Altman Z-Score: {v_zscore}
-                - Piotroski F-Score: {v_fscore}
-                - ROIC vs WACC Spread: {v_roic}
-                - RSI (14-Day): {v_rsi}
-                """
+                metrics_summary = (
+                    f"- Current Price: {v_price}\n"
+                    f"- DCF Base Case Implied Value: {v_dcf}\n"
+                    f"- Cost of Capital / WACC: {v_wacc}\n"
+                    f"- Altman Z-Score: {v_zscore}\n"
+                    f"- Piotroski F-Score: {v_fscore}\n"
+                    f"- ROIC vs WACC Spread: {v_roic}\n"
+                    f"- RSI (14-Day): {v_rsi}\n"
+                )
                 
                 with st.spinner("Executing multi-variable semantic analysis via Gemini..."):
                     try:
@@ -2153,33 +1898,24 @@ if st.session_state.app_running and selected_ticker:
                         thesis_data = f"ERROR: {e}"
 
                     if isinstance(thesis_data, dict):
-                        if "ai_thesis_store" not in st.session_state:
-                            st.session_state.ai_thesis_store = {}
                         st.session_state.ai_thesis_store[selected_ticker] = thesis_data
                     elif isinstance(thesis_data, str) and thesis_data.startswith("ERROR:"):
-                        # This will print the exact reason it failed to your screen
                         st.error(f"API Diagnostics: {thesis_data}")
                     else:
                         st.warning("Engine failed to parse structured thesis. Please try again.")
 
-            # Persistent display — reads from session_state so it survives
-            # reruns triggered by OTHER widgets (like the PDF download
-            # button below), instead of only existing during the exact
-            # script run where "Run Quantitative Synthesis" was clicked.
             _persisted_thesis = st.session_state.get("ai_thesis_store", {}).get(selected_ticker)
             if _persisted_thesis:
                 st.caption(f"✅ Cached synthesis for {selected_ticker} — included in the PDF Tear Sheet above.")
                 _render_thesis_display(_persisted_thesis)
 
-        # =========================================================
-        # PDF TEAR SHEET RENDER (deferred — see pdf_slot note above)
-        # =========================================================
+        # PDF Tear Sheet render deferred block
         cached_thesis = st.session_state.ai_thesis_store.get(selected_ticker)
         pdf_ctx = {
             "ticker": selected_ticker, "full_name": full_name, "sector": info.get('sector', 'N/A'),
             "industry": info.get('industry', 'N/A'), "exchange": info.get('exchange', 'N/A'),
             "curr_sym": curr_sym, "currency": currency, "current_price": current_price,
-            "market_cap": info.get('marketCap'), "beta": beta_raw, "pe": info.get('trailingPE'),
+            "market_cap": market_cap, "beta": beta_raw, "pe": info.get('trailingPE'),
             "high_52": info.get('fiftyTwoWeekHigh'), "low_52": info.get('fiftyTwoWeekLow'),
             "div_yield": dividend_yield, "dcf_results": pdf_dcf, "graham_number": graham_number,
             "dupont": dupont_data, "z_score": z_score, "z_model_type": model_type,
@@ -2194,3 +1930,4 @@ if st.session_state.app_running and selected_ticker:
                 st.caption("Includes AI synthesis from this session.")
             else:
                 st.caption("Run AI Synthesis (bottom tab) to include it in this PDF.")
+
